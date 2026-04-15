@@ -654,6 +654,8 @@ def get_full_state():
             curves_data[ch] = {"a":p.get("a",1),"b":p.get("b",0.5),
                 "avgSpend":info.get("current_avg_spend",0),"satSpend":info.get("saturation_spend",0),
                 "mROI":info.get("marginal_roi",0),"hd":info.get("headroom_pct",0),
+                "r2":info.get("diagnostics",{}).get("r_squared",0),
+                "model":info.get("model","power_law"),
                 "cp":info.get("curve_points",[])}
     
     tS = float(df["spend"].sum())
@@ -672,7 +674,7 @@ def get_full_state():
         "channelTrends": _state.get("channel_trends") or {},
         "modelSelections": _state.get("model_selections") or {},
         "modelDiagnostics": {
-            "response_curves": {"model": _state.get("_model_type","power_law"), "channels": len(curves_data), "avg_r2": round(sum(c.get("r2",0) for c in (_state.get("curves") or {}).values() if "error" not in c) / max(len(curves_data),1), 3)},
+            "response_curves": {"model": _state.get("_model_type","power_law"), "channels": len(curves_data), "avg_r2": round(sum(c.get("diagnostics",{}).get("r_squared",0) for c in (_state.get("curves") or {}).values() if "error" not in c) / max(len(curves_data),1), 3)},
             "mmm": {"method": (_state.get("mmm_result") or {}).get("method","not_run"), "r2": (_state.get("mmm_result") or {}).get("model_diagnostics",{}).get("r_squared",0)},
             "forecasting": {"method": "prophet" if _state.get("forecast") else "not_run"},
             "optimizer": {"converged": (_state.get("optimization") or {}).get("optimizer_info",{}).get("converged", True)},

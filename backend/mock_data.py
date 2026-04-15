@@ -48,8 +48,9 @@ MONTHS = pd.date_range("2022-01-01", periods=48, freq="MS")  # 4 years for model
 SEASONALITY = [0.85, 0.80, 0.95, 1.05, 1.10, 1.00, 0.90, 0.88, 1.05, 1.15, 1.25, 1.30]
 
 
-def _diminishing_returns(spend: float, saturation: float, alpha: float = 0.6) -> float:
-    """Power-law diminishing returns: response = spend^alpha, scaled by saturation."""
+def _diminishing_returns(spend: float, saturation: float, alpha: float = 0.45) -> float:
+    """Power-law diminishing returns: response = spend^alpha, scaled by saturation.
+    alpha=0.45 gives visible diminishing returns: doubling spend only gives ~1.37x output."""
     if saturation is None or saturation == 0:
         return spend
     normalized = spend / saturation
@@ -86,13 +87,15 @@ def generate_campaign_performance() -> pd.DataFrame:
                         monthly_spend, channel_props["saturation_point"]
                     )
                     
-                    # Calculate funnel metrics
+                    # Calculate funnel metrics — diminishing returns flow through
                     impressions = _add_noise(effective_output * _get_impression_mult(channel_name), 0.15)
                     clicks = _add_noise(impressions * _get_ctr(channel_name, campaign), 0.12)
                     leads = _add_noise(clicks * _get_lead_rate(channel_name), 0.15)
                     mqls = _add_noise(leads * np.random.uniform(0.3, 0.6), 0.1)
                     sqls = _add_noise(mqls * np.random.uniform(0.25, 0.5), 0.1)
-                    conversions = _add_noise(sqls * channel_props["base_cvr"] * season * 10, 0.18)
+                    # Conversions: DO NOT re-apply season — it's already in spend→effective_output
+                    # This ensures high spend months show lower ROI (diminishing returns)
+                    conversions = _add_noise(sqls * channel_props["base_cvr"] * 10, 0.18)
                     
                     # Revenue per conversion varies by product mix
                     avg_order_value = _add_noise(_get_aov(channel_name), 0.1)

@@ -49,7 +49,7 @@ const[modelSel,setModelSel]=useState({attribution:"markov",response_curves:"auto
 const[modelDiag,setModelDiag]=useState({});
 const[channelTrends,setChannelTrends]=useState({});
 const[extData,setExtData]=useState({});
-const[modelPanelOpen,setModelPanelOpen]=useState(false);
+const[modelPanelOpen,setModelPanelOpen]=useState(true);
 const[modelRunning,setModelRunning]=useState(false);
 const[scenarios,setScenarios]=useState([]);
 const[showScenarios,setShowScenarios]=useState(false);
@@ -131,46 +131,61 @@ const deleteScenario=async(id)=>{if(!confirm("Delete this scenario?"))return;
 const exportCSV=()=>{if(!D)return;const h="Channel,Current,Optimized,Change%,ProjRev,ROI\n";const b=D.opt.channels.map(c=>`${FN(c.channel)},${c.cS},${c.oS},${c.chg.toFixed(1)}%,${c.oR},${c.oROI.toFixed(2)}`).join("\n");const bl=new Blob([h+b],{type:"text/csv"});const u=URL.createObjectURL(bl);const a=document.createElement("a");a.href=u;a.download="yield_plan.csv";a.click()};
 
 /* ═══ LOADING ═══ */
-if(loading)return(<div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#FAFAF7",fontFamily:"'Bricolage Grotesque',serif"}}>
-<style>{`@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700&display=swap');@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}`}</style>
+if(loading)return(<div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#FAFAF7",fontFamily:"'DM Sans',sans-serif"}}>
+<style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700&display=swap');@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}`}</style>
 <div style={{textAlign:"center"}}>
-<div style={{width:64,height:64,borderRadius:16,background:"linear-gradient(135deg,#1B6B5F,#2A9D8F)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 24px",boxShadow:"0 8px 32px rgba(27,107,95,.2)",animation:"breathe 2s ease infinite"}}><Target size={30} color="#fff" strokeWidth={2}/></div>
+<div style={{width:64,height:64,borderRadius:16,background:V.gradient||"linear-gradient(135deg,#0D9488,#3B82F6)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 24px",boxShadow:"0 8px 32px rgba(27,107,95,.2)",animation:"breathe 2s ease infinite"}}><Target size={30} color="#fff" strokeWidth={2}/></div>
 <div style={{fontSize:26,fontWeight:700,color:"#1A1A2E",letterSpacing:-.5}}>Yield Intelligence</div>
 <div style={{fontSize:13,color:"#9CA3AF",marginTop:6,letterSpacing:1,fontFamily:"'Outfit',sans-serif"}}>Loading marketing engines...</div>
 </div></div>);
 
 /* ═══ DESIGN TOKENS ═══ */
 const V = {
-  bg:"#FAFAF7", card:"#FFFFFF", cardBorder:"#E8E6E1", text:"#1A1A2E", textMuted:"#6B7280", textLight:"#9CA3AF",
-  teal:"#1B6B5F", tealLight:"#E6F5F2", green:"#059669", greenLight:"#ECFDF5",
+  bg:"#F8FAFC", card:"#FFFFFF", cardBorder:"#E2E8F0", text:"#0F172A", textMuted:"#64748B", textLight:"#94A3B8",
+  teal:"#0D9488", tealLight:"#F0FDFA", tealDark:"#115E59",
+  green:"#059669", greenLight:"#ECFDF5", greenDark:"#065F46",
   red:"#DC2626", redLight:"#FEF2F2", amber:"#D97706", amberLight:"#FFFBEB",
-  blue:"#2563EB", blueLight:"#EFF6FF", violet:"#7C3AED",
-  shadow:"0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04)", shadowLg:"0 4px 16px rgba(0,0,0,.08)",
+  blue:"#3B82F6", blueLight:"#EFF6FF", violet:"#7C3AED", violetLight:"#F5F3FF",
+  navy:"#0F172A", navyLight:"#1E293B",
+  shadow:"0 1px 3px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.04)",
+  shadowMd:"0 4px 12px rgba(15,23,42,.07),0 2px 4px rgba(15,23,42,.04)",
+  shadowLg:"0 10px 40px rgba(15,23,42,.12),0 4px 12px rgba(15,23,42,.06)",
+  gradient:"linear-gradient(135deg,#0D9488 0%,#3B82F6 100%)",
 };
 const tt={background:"#fff",border:"1px solid #E8E6E1",borderRadius:8,fontSize:12,color:"#1A1A2E",boxShadow:V.shadowLg};
 
 const TABS=[{id:"home",icon:Home,label:"Executive Summary",sec:"overview"},{id:"performance",icon:BarChart3,label:"Performance",sec:"analysis"},{id:"deepdive",icon:Search,label:"Deep Dive",sec:"analysis"},{id:"pillars",icon:AlertTriangle,label:"Value Leakage",sec:"analysis"},{id:"recommendations",icon:Lightbulb,label:"Actions",sec:"decision"},{id:"optimizer",icon:Target,label:"Optimizer",sec:"decision"},{id:"business",icon:FileText,label:"Business Case",sec:"action"}];
 
 /* ═══ COMPONENTS ═══ */
-const Card=({children,style:s,...p})=><div style={{background:V.card,borderRadius:14,padding:20,border:`1px solid ${V.cardBorder}`,boxShadow:V.shadow,...s}} {...p}>{children}</div>;
-const KPI=({label,value,sub,color=V.teal,icon:Ic,big,onClick})=><Card onClick={onClick} style={{cursor:onClick?"pointer":"default",position:"relative",overflow:"hidden",transition:"transform .15s,box-shadow .15s"}} onMouseEnter={e=>{if(onClick){e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow=V.shadowLg}}} onMouseLeave={e=>{e.currentTarget.style.transform="none";e.currentTarget.style.boxShadow=V.shadow}}>
-{Ic&&<div style={{position:"absolute",top:-6,right:-6,opacity:.06}}><Ic size={big?80:56} color={color}/></div>}
-<div style={{fontSize:11,color:V.textMuted,textTransform:"uppercase",letterSpacing:1,fontWeight:600,fontFamily:"'Outfit',sans-serif",marginBottom:big?10:5}}>{label}</div>
-<div style={{fontSize:big?30:22,fontWeight:800,color:V.text,letterSpacing:-.5,lineHeight:1}}>{value}</div>
-{sub&&<div style={{fontSize:12,color:sub.c||V.textMuted,marginTop:6,fontWeight:500,fontFamily:"'Outfit',sans-serif"}}>{sub.t}</div>}
-</Card>;
-const Badge=({children,color=V.teal,filled})=><span style={{display:"inline-flex",padding:"3px 9px",borderRadius:6,background:filled?color:`${color}12`,color:filled?"#fff":color,fontSize:10,fontWeight:700,letterSpacing:.3,fontFamily:"'Outfit',sans-serif"}}>{children}</span>;
-const Btn=({children,primary,onClick,style:s})=><button onClick={onClick} style={{padding:"9px 18px",background:primary?`linear-gradient(135deg,${V.teal},#2A9D8F)`:"#fff",color:primary?"#fff":V.text,border:primary?"none":`1px solid ${V.cardBorder}`,borderRadius:8,cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"'Outfit',sans-serif",display:"inline-flex",alignItems:"center",gap:6,boxShadow:primary?"0 2px 8px rgba(27,107,95,.25)":V.shadow,transition:"all .15s",...s}}>{children}</button>;
+const Card=({children,style:s,...p})=><div style={{background:V.card,borderRadius:16,padding:22,border:`1px solid ${V.cardBorder}`,boxShadow:V.shadow,transition:"all .2s cubic-bezier(.16,1,.3,1)",...s}} onMouseEnter={e=>{if(s?.cursor==="pointer"){e.currentTarget.style.boxShadow=V.shadowMd;e.currentTarget.style.transform="translateY(-1px)"}}} onMouseLeave={e=>{e.currentTarget.style.boxShadow=V.shadow;e.currentTarget.style.transform="none"}} {...p}>{children}</div>;
+const KPI=({label,value,sub,color=V.teal,icon:Ic,big,onClick})=><Card onClick={onClick} style={{cursor:onClick?"pointer":"default",position:"relative",overflow:"hidden",borderTop:`3px solid ${color}20`}}>
+{Ic&&<div style={{position:"absolute",top:-8,right:-8,opacity:.05}}><Ic size={big?90:60} color={color}/></div>}
+<div style={{fontSize:10,color:V.textLight,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700,fontFamily:"'Outfit',sans-serif",marginBottom:big?12:6}}>{label}</div>
+<div style={{fontSize:big?36:24,fontWeight:800,color:V.text,letterSpacing:-.8,lineHeight:1,fontFamily:"'DM Sans',sans-serif"}}>{value}</div>
+{sub&&<div style={{fontSize:12,color:sub.c||V.textMuted,marginTop:8,fontWeight:500,fontFamily:"'Outfit',sans-serif",display:"flex",alignItems:"center",gap:4}}>{sub.c===V.green||sub.c===V.teal?<ArrowUpRight size={14}/>:sub.c===V.red?<ArrowDownRight size={14}/>:null}{sub.t}</div>}
+</Card>};
+const Badge=({children,color=V.teal,filled})=><span style={{display:"inline-flex",alignItems:"center",padding:"3px 10px",borderRadius:20,background:filled?color:`${color}10`,color:filled?"#fff":color,fontSize:10,fontWeight:700,letterSpacing:.4,fontFamily:"'Outfit',sans-serif",border:filled?"none":`1px solid ${color}25`}}>{children}</span>;
+const Btn=({children,primary,onClick,style:s})=><button onClick={onClick} style={{padding:"9px 18px",background:primary?V.gradient:"#fff",color:primary?"#fff":V.text,border:primary?"none":`1px solid ${V.cardBorder}`,borderRadius:10,cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"'Outfit',sans-serif",display:"inline-flex",alignItems:"center",gap:6,boxShadow:primary?"0 4px 14px rgba(13,148,136,.3)":V.shadow,transition:"all .2s cubic-bezier(.16,1,.3,1)",...s}} onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-1px)";e.currentTarget.style.boxShadow=primary?"0 6px 20px rgba(13,148,136,.4)":V.shadowMd}} onMouseLeave={e=>{e.currentTarget.style.transform="none";e.currentTarget.style.boxShadow=primary?"0 4px 14px rgba(13,148,136,.3)":V.shadow}}>{children}</button>;
 const SectionLabel=({children})=><div style={{fontSize:10,fontWeight:700,color:V.textMuted,textTransform:"uppercase",letterSpacing:1.2,marginBottom:12,fontFamily:"'Outfit',sans-serif"}}>{children}</div>;
-const InsightStrip=({items})=>items&&items.length>0?<div style={{marginBottom:20,padding:"14px 18px",background:`linear-gradient(135deg,${V.tealLight},#fff)`,borderRadius:12,border:`1px solid ${V.teal}15`,borderLeft:`4px solid ${V.teal}`}}>
-<div style={{fontSize:10,fontWeight:700,color:V.teal,textTransform:"uppercase",letterSpacing:1,marginBottom:8,display:"flex",alignItems:"center",gap:5}}><Zap size={11}/>Key Insights</div>
-{items.slice(0,3).map((it,i)=><div key={i} style={{fontSize:12,color:V.textMuted,lineHeight:1.7,marginBottom:i<items.length-1?6:0,paddingLeft:12,borderLeft:it.type==="negative"||it.type==="warning"?`2px solid ${V.red}`:it.type==="positive"?`2px solid ${V.green}`:`2px solid ${V.blue}`}}>
-<span style={{fontWeight:600,color:V.text}}>{it.headline||it.text}</span>{it.detail?<span> — {it.detail}</span>:null}
+const InsightStrip=({items,title})=>items&&items.length>0?<div style={{marginBottom:24,borderRadius:14,overflow:"hidden",border:`1px solid ${V.cardBorder}`,boxShadow:V.shadow}}>
+<div style={{padding:"12px 20px",background:V.navy,display:"flex",alignItems:"center",gap:8}}>
+<div style={{width:24,height:24,borderRadius:8,background:"rgba(255,255,255,.15)",display:"flex",alignItems:"center",justifyContent:"center"}}><Zap size={13} color="#fff"/></div>
+<span style={{fontSize:12,fontWeight:700,color:"#fff",letterSpacing:.5}}>{title||"Key Insights"}</span>
+</div>
+<div style={{padding:"14px 20px",background:V.card}}>
+{items.slice(0,3).map((it,i)=><div key={i} style={{display:"flex",gap:12,padding:"10px 0",borderBottom:i<Math.min(items.length,3)-1?`1px solid ${V.cardBorder}`:"none"}}>
+<div style={{width:4,borderRadius:2,flexShrink:0,background:it.type==="negative"||it.type==="warning"?V.red:it.type==="positive"?V.green:V.blue}}/>
+<div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:V.text,marginBottom:2}}>{it.headline||it.text}</div>
+{it.detail&&<div style={{fontSize:12,color:V.textMuted,lineHeight:1.6}}>{it.detail}</div>}
+</div>
 </div>)}
+</div>
 </div>:null;
-const SmartRecCard=({r,i})=><Card key={i} style={{borderLeft:`4px solid ${r.type==="REALLOCATE"?V.teal:r.type==="DECLINING"?V.red:r.type==="FIX_CX"?V.amber:r.type==="HIDDEN_VALUE"?V.violet:r.type==="DEFEND"?V.red:r.type==="OPPORTUNITY"?V.green:r.type==="PREPARE"?V.amber:r.type==="MITIGATE"?V.red:r.type==="CAPITALIZE"?V.green:r.type==="BENCHMARK"?V.blue:r.type==="COST_ALERT"?V.red:r.type==="DIFFERENTIATE"?V.violet:V.blue}`,animation:`fadeIn .3s ease ${i*.05}s both`}}>
+const recColor=t=>({REALLOCATE:V.teal,DECLINING:V.red,FIX_CX:V.amber,HIDDEN_VALUE:V.violet,DEFEND:V.red,OPPORTUNITY:V.green,PREPARE:V.amber,MITIGATE:V.red,CAPITALIZE:V.green,BENCHMARK:V.blue,COST_ALERT:V.red,DIFFERENTIATE:V.violet,SCALE:V.green,REDUCE:V.red,FIX:V.amber,RETARGET:V.blue,MAINTAIN:V.teal}[t]||V.blue);
+const SmartRecCard=({r,i})=>{const rc=recColor(r.type);return<Card key={i} style={{borderLeft:`4px solid ${rc}`,animation:`fadeIn .4s cubic-bezier(.16,1,.3,1) ${i*.06}s both`,position:"relative",overflow:"hidden"}}>
+<div style={{position:"absolute",top:0,right:0,width:120,height:120,background:`radial-gradient(circle at top right,${rc}06,transparent 70%)`}}/>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-<div style={{display:"flex",gap:8,alignItems:"center"}}><Badge color={r.type==="REALLOCATE"?V.teal:r.type==="DECLINING"?V.red:r.type==="FIX_CX"?V.amber:r.type==="HIDDEN_VALUE"?V.violet:r.type==="DEFEND"?V.red:r.type==="OPPORTUNITY"?V.green:r.type==="PREPARE"?V.amber:r.type==="MITIGATE"?V.red:r.type==="CAPITALIZE"?V.green:r.type==="BENCHMARK"?V.blue:r.type==="COST_ALERT"?V.red:r.type==="DIFFERENTIATE"?V.violet:V.blue} filled>{r.type.replace(/_/g," ")}</Badge><span style={{fontSize:13,fontWeight:600,color:CH[r.channel]?.color||V.text}}>{FN(r.channel)}</span></div>
+<div style={{display:"flex",gap:8,alignItems:"center"}}><Badge color={rc} filled>{r.type.replace(/_/g," ")}</Badge><span style={{fontSize:13,fontWeight:600,color:CH[r.channel]?.color||V.text}}>{FN(r.channel)}</span></div>
 <div style={{display:"flex",gap:6}}><Badge color={r.confidence==="High"?V.green:V.amber}>{r.confidence}</Badge>{r.impact>0&&<Badge color={V.green}>+{F(r.impact)}</Badge>}{r.impact<0&&<Badge color={V.red}>{F(r.impact)}</Badge>}</div>
 </div>
 <div style={{fontSize:13,color:V.textMuted,lineHeight:1.7,marginBottom:12}}>{r.narrative}</div>
@@ -190,27 +205,27 @@ const SmartRecCard=({r,i})=><Card key={i} style={{borderLeft:`4px solid ${r.type
 </Card>;
 
 return(<div style={{minHeight:"100vh",background:V.bg,color:V.text,fontFamily:"'Outfit','Bricolage Grotesque',sans-serif",display:"flex"}}>
-<style>{`@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#D1D5DB;border-radius:3px}table{width:100%;border-collapse:collapse;font-size:12px;font-family:'Outfit',sans-serif}th{text-align:left;padding:10px 12px;color:${V.textMuted};font-weight:600;border-bottom:2px solid ${V.cardBorder};font-size:11px;text-transform:uppercase;letter-spacing:.6px}td{padding:10px 12px;border-bottom:1px solid #F3F4F6}tr:hover td{background:#FAFAF7}select{background:#fff;color:${V.text};border:1px solid ${V.cardBorder};padding:6px 10px;border-radius:8px;font-size:12px;font-family:inherit;outline:none}input[type=range]{accent-color:${V.teal};width:100%}h1,h2,h3{font-family:'Bricolage Grotesque',serif}@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}.fade-in{animation:fadeIn .4s ease both}`}</style>
+<style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700&display=swap');*{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#D1D5DB;border-radius:3px}table{width:100%;border-collapse:collapse;font-size:12px;font-family:'Outfit',sans-serif}th{text-align:left;padding:10px 12px;color:${V.textMuted};font-weight:600;border-bottom:2px solid ${V.cardBorder};font-size:11px;text-transform:uppercase;letter-spacing:.6px}td{padding:10px 12px;border-bottom:1px solid #F3F4F6}tr:hover td{background:#FAFAF7}select{background:#fff;color:${V.text};border:1px solid ${V.cardBorder};padding:6px 10px;border-radius:8px;font-size:12px;font-family:inherit;outline:none}input[type=range]{accent-color:${V.teal};width:100%}h1,h2,h3{font-family:'DM Sans',sans-serif}@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}.fade-in{animation:fadeIn .5s cubic-bezier(.16,1,.3,1) both}`}</style>
 
 {/* ═══ SIDEBAR ═══ */}
-<nav style={{width:230,minHeight:"100vh",background:"#fff",borderRight:`1px solid ${V.cardBorder}`,display:"flex",flexDirection:"column",flexShrink:0,position:"sticky",top:0,zIndex:10}}>
-<div style={{padding:"20px 18px",borderBottom:`1px solid ${V.cardBorder}`,display:"flex",alignItems:"center",gap:12}}>
-<div style={{width:40,height:40,borderRadius:12,background:`linear-gradient(135deg,${V.teal},#2A9D8F)`,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 4px 12px rgba(27,107,95,.2)"}}><Target size={20} color="#fff" strokeWidth={2.5}/></div>
-<div><div style={{fontSize:15,fontWeight:800,color:V.teal,fontFamily:"'Bricolage Grotesque',serif",letterSpacing:-.3}}>Yield Intelligence</div><div style={{fontSize:9,color:V.textLight,letterSpacing:1.5,textTransform:"uppercase",marginTop:1}}>ROI & Budget Engine</div></div>
+<nav style={{width:240,minHeight:"100vh",background:V.navy,borderRight:"none",display:"flex",flexDirection:"column",flexShrink:0,position:"sticky",top:0,zIndex:10}}>
+<div style={{padding:"22px 20px",borderBottom:"1px solid rgba(255,255,255,.08)",display:"flex",alignItems:"center",gap:12}}>
+<div style={{width:40,height:40,borderRadius:12,background:V.gradient,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 4px 16px rgba(13,148,136,.3)"}}><Target size={20} color="#fff" strokeWidth={2.5}/></div>
+<div><div style={{fontSize:15,fontWeight:800,color:"#fff",fontFamily:"'DM Sans',sans-serif",letterSpacing:-.3}}>Yield Intelligence</div><div style={{fontSize:9,color:"rgba(255,255,255,.45)",letterSpacing:2,textTransform:"uppercase",marginTop:2}}>Marketing ROI Engine</div></div>
 </div>
 <div style={{flex:1,padding:"16px 10px"}}>
 {["overview","analysis","decision","action"].map(sec=><div key={sec} style={{marginBottom:20}}>
-<div style={{fontSize:9,fontWeight:700,color:V.textLight,textTransform:"uppercase",letterSpacing:2,padding:"0 10px",marginBottom:6}}>{{overview:"Overview",analysis:"Analysis",decision:"Decisioning",action:"Action"}[sec]}</div>
-{TABS.filter(t=>t.sec===sec).map(t=>{const active=tab===t.id;return<button key={t.id} onClick={()=>setTab(t.id)} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 12px",border:"none",background:active?V.tealLight:"transparent",color:active?V.teal:V.textMuted,cursor:"pointer",borderRadius:9,fontSize:13,fontWeight:active?600:400,fontFamily:"'Outfit',sans-serif",transition:"all .12s",position:"relative"}}>
-{active&&<div style={{position:"absolute",left:0,top:"50%",transform:"translateY(-50%)",width:3,height:22,borderRadius:2,background:V.teal}}/>}
+<div style={{fontSize:9,fontWeight:700,color:"rgba(255,255,255,.3)",textTransform:"uppercase",letterSpacing:2.5,padding:"0 12px",marginBottom:8}}>{{overview:"Overview",analysis:"Analysis",decision:"Decisioning",action:"Action"}[sec]}</div>
+{TABS.filter(t=>t.sec===sec).map(t=>{const active=tab===t.id;return<button key={t.id} onClick={()=>setTab(t.id)} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"10px 14px",border:"none",background:active?"rgba(13,148,136,.12)":"transparent",color:active?"#5EEAD4":"rgba(255,255,255,.5)",cursor:"pointer",borderRadius:10,fontSize:13,fontWeight:active?600:400,fontFamily:"'Outfit',sans-serif",transition:"all .15s",position:"relative"}}>
+{active&&<div style={{position:"absolute",left:0,top:"50%",transform:"translateY(-50%)",width:3,height:20,borderRadius:2,background:V.gradient}}/>}
 <t.icon size={17} strokeWidth={active?2.2:1.7}/>{t.label}
 </button>})}
 </div>)}
 </div>
-<div style={{padding:"14px 18px",borderTop:`1px solid ${V.cardBorder}`,display:"flex",alignItems:"center",gap:8,fontSize:11,color:V.textLight}}>
+<div style={{padding:"14px 20px",borderTop:"1px solid rgba(255,255,255,.06)",display:"flex",alignItems:"center",gap:8,fontSize:11,color:"rgba(255,255,255,.35)"}}>
 <Shield size={14}/><span>FY 2025</span>
-{apiMode&&<Badge color={V.green} filled>API Live</Badge>}
-{!apiMode&&<Badge color={V.amber}>Demo Mode</Badge>}
+{apiMode&&<Badge color={V.green} filled>API</Badge>}
+{!apiMode&&<Badge color={V.amber} filled>Demo</Badge>}
 </div>
 </nav>
 
@@ -235,8 +250,8 @@ return(<div style={{minHeight:"100vh",background:V.bg,color:V.text,fontFamily:"'
 <div style={{position:"absolute",top:-40,right:60,width:180,height:180,borderRadius:"50%",background:`radial-gradient(circle,${V.teal}08,transparent 70%)`}}/>
 <div style={{position:"absolute",bottom:-30,right:200,width:120,height:120,borderRadius:"50%",background:`radial-gradient(circle,${V.blue}06,transparent 70%)`}}/>
 <div style={{position:"relative"}}>
-<div style={{display:"inline-flex",alignItems:"center",gap:6,background:V.teal,color:"#fff",padding:"4px 12px",borderRadius:20,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:14}}><Zap size={11}/>Marketing Value Summary</div>
-<h1 style={{fontSize:34,fontWeight:800,color:V.text,letterSpacing:-.8,lineHeight:1.15,marginBottom:14}}>Are we getting the value we should<br/>from our marketing investments?</h1>
+<div style={{display:"inline-flex",alignItems:"center",gap:6,background:V.navy,color:"#fff",padding:"4px 12px",borderRadius:20,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:14}}><Zap size={11}/>Marketing Value Summary</div>
+<h1 style={{fontSize:32,fontWeight:800,color:V.text,letterSpacing:-.8,lineHeight:1.2,marginBottom:14,fontFamily:"'DM Sans',sans-serif"}}>Marketing Performance<br/>& Budget Intelligence</h1>
 <p style={{fontSize:15,color:V.textMuted,lineHeight:1.6,maxWidth:620,fontFamily:"'Outfit',sans-serif"}}>{Object.keys(CH).length} channels · {cpD.length} campaigns · {fd.length.toLocaleString()} data points across online and offline</p>
 </div></div>
 
@@ -252,15 +267,19 @@ return(<div style={{minHeight:"100vh",background:V.bg,color:V.text,fontFamily:"'
 </div>
 
 {/* Aha Moments */}
-<div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:28}}>
-{[{color:V.red,bg:V.redLight,icon:AlertCircle,title:"Value is leaking",body:`${F(D.pl.leak.total)} revenue at risk from saturated and underfunded channels.`,link:"pillars",cta:"View leakage drivers"},
-{color:V.green,bg:V.greenLight,icon:Zap,title:"Better mix beats bigger budget",body:`Optimized mix improves ROI by ${FP(D.opt.summary.uplift)} without increasing total spend.`,link:"optimizer",cta:"See optimized plan"},
-{color:V.teal,bg:V.tealLight,icon:Eye,title:"Experience is part of the economics",body:`${F(D.pl.exp.total)} in conversion suppression from journey friction, not media.`,link:"recommendations",cta:"Review actions"}].map(a=>
-<Card key={a.title} style={{borderLeft:`4px solid ${a.color}`,background:`linear-gradient(135deg,${a.bg},#fff)`}}>
-<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}><div style={{width:28,height:28,borderRadius:8,background:a.color,display:"flex",alignItems:"center",justifyContent:"center"}}><a.icon size={14} color="#fff"/></div><span style={{fontSize:10,fontWeight:700,color:a.color,textTransform:"uppercase",letterSpacing:1}}>Key Insight</span></div>
-<div style={{fontSize:16,fontWeight:700,color:V.text,lineHeight:1.3,marginBottom:8,fontFamily:"'Bricolage Grotesque',serif"}}>{a.title}</div>
-<div style={{fontSize:13,color:V.textMuted,lineHeight:1.6,marginBottom:12}}>{a.body}</div>
-<button onClick={()=>setTab(a.link)} style={{background:"none",border:"none",color:a.color,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}}>{a.cta} <ChevronRight size={13}/></button>
+<div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,marginBottom:28}}>
+{[{color:V.red,icon:AlertCircle,title:"Value at Risk",metric:F(D.pl.leak.total),body:"Revenue leaking from saturated and underfunded channels",link:"pillars",cta:"View drivers"},
+{color:V.teal,icon:TrendingUp,title:"Optimization Uplift",metric:FP(D.opt.summary.uplift),body:"Achievable without increasing total spend — just reallocation",link:"optimizer",cta:"See plan"},
+{color:V.amber,icon:Activity,title:"CX Friction Loss",metric:F(D.pl.exp.total),body:"Conversion suppression from journey friction, not media",link:"recommendations",cta:"Review fixes"}].map(a=>
+<Card key={a.title} style={{background:V.card,cursor:"pointer",position:"relative",overflow:"hidden"}} onClick={()=>setTab(a.link)}>
+<div style={{position:"absolute",top:0,left:0,right:0,height:3,background:a.color}}/>
+<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,marginTop:4}}>
+<div style={{width:36,height:36,borderRadius:10,background:`${a.color}12`,display:"flex",alignItems:"center",justifyContent:"center"}}><a.icon size={18} color={a.color}/></div>
+<span style={{fontSize:11,fontWeight:700,color:V.textLight,textTransform:"uppercase",letterSpacing:1.2}}>{a.title}</span>
+</div>
+<div style={{fontSize:32,fontWeight:800,color:a.color,letterSpacing:-1,lineHeight:1,marginBottom:10,fontFamily:"'DM Sans',sans-serif"}}>{a.metric}</div>
+<div style={{fontSize:13,color:V.textMuted,lineHeight:1.6,marginBottom:14}}>{a.body}</div>
+<div style={{display:"flex",alignItems:"center",gap:4,fontSize:12,fontWeight:600,color:a.color}}>{a.cta} <ArrowRight size={14}/></div>
 </Card>)}
 </div>
 
@@ -567,7 +586,7 @@ return<><div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,m
 </Card></div>
 <Card style={{background:`linear-gradient(135deg,${V.tealLight},#fff)`,border:`1px solid ${V.teal}20`}}>
 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-<div><div style={{fontSize:14,fontWeight:700,color:V.teal,marginBottom:4,fontFamily:"'Bricolage Grotesque',serif"}}>Export & Action Pack</div><div style={{fontSize:12,color:V.textMuted}}>Generate allocation plan, executive summary, or recommendation document</div></div>
+<div><div style={{fontSize:14,fontWeight:700,color:V.teal,marginBottom:4,fontFamily:"'DM Sans',sans-serif"}}>Export & Action Pack</div><div style={{fontSize:12,color:V.textMuted}}>Generate allocation plan, executive summary, or recommendation document</div></div>
 <div style={{display:"flex",gap:10}}><Btn onClick={exportCSV}><Download size={13}/>CSV Plan</Btn><Btn primary onClick={exportExecSummary}><FileText size={13}/>Executive Summary</Btn></div>
 </div></Card>
 
@@ -598,5 +617,8 @@ return<><div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,m
 
 </div>
 {/* Footer */}
-<div style={{borderTop:`1px solid ${V.cardBorder}`,padding:"16px 32px",textAlign:"center",fontSize:11,color:V.textLight}}>Yield Intelligence Platform · Marketing ROI & Budget Optimization Engine · {apiMode?"Backend API Connected":"Demo Mode"} · Confidential</div>
+<div style={{borderTop:`1px solid ${V.cardBorder}`,padding:"14px 32px",display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,color:V.textLight}}>
+<span>Yield Intelligence Platform</span>
+<span>{apiMode?"Backend API Connected · 48 Endpoints":"Demo Mode — Connect API for full analytics"}</span>
+</div>
 </main></div>)}
