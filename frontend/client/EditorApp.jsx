@@ -8,6 +8,9 @@ import {
   deleteCommentary,
   suppressFinding,
   unsuppressFinding,
+  getStoredAuth,
+  setUnauthorizedHandler,
+  logout,
 } from "./api.js";
 import { Diagnosis } from "./screens/Diagnosis.jsx";
 import { Plan } from "./screens/Plan.jsx";
@@ -18,25 +21,12 @@ import { GlobalStyles } from "./DiagnosisApp.jsx";
 /**
  * EditorApp — EY-mode shell for MarketLens.
  *
- * Same screens as the client app, but with editor callbacks wired to the
- * /api/editor/* endpoints. Rendered from the separate index-editor.html
- * entry point so the client build literally cannot contain editor controls.
+ * Auth guard (v18e): this shell REQUIRES an `editor` role specifically.
+ * A client-role user accessing /editor is redirected to / (the client
+ * view) rather than /login — they're authenticated, just not authorized
+ * for this surface. Unauthenticated users go to /login.
  *
- * Screen routing: reads ?screen= from URL. "diagnosis" (default) or "plan".
- * Same editor overlay mechanism works on both — commentary and suppression
- * keys are stable per-surface (findings for Diagnosis, moves for Plan),
- * so the same handlers serve both screens.
- *
- * Responsibilities:
- *  - Load the current screen's data with view=editor (includes suppressed
- *    items flagged rather than filtered, plus commentary attached)
- *  - Manage modal and toast state at the app level so all cards share
- *    one modal and one toast stack
- *  - Call editor mutation endpoints, refetch on success, surface errors
- *    via toast so the user knows a save landed or failed
- *  - Render a distinct header that makes it impossible to confuse editor
- *    and client modes (different background band, "EY Editor" badge,
- *    override count indicators)
+ * [...]
  */
 function getScreenFromUrl() {
   if (typeof window === "undefined") return "diagnosis";
@@ -45,12 +35,21 @@ function getScreenFromUrl() {
   return s === "plan" ? "plan" : "diagnosis";
 }
 
+function redirectToLogin() {
+  if (typeof window !== "undefined") window.location.href = "/login";
+}
+
+function redirectToClient() {
+  if (typeof window !== "undefined") window.location.href = "/";
+}
+
 export default function EditorApp() {
   const screen = getScreenFromUrl();
   const [state, setState] = useState({ status: "loading", data: null, error: null });
   const [suppressTarget, setSuppressTarget] = useState(null);
   const [toast, setToast] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [auth, setAuth] = useState(null);
 
   const reload = useCallback(async () => {
     const loader = screen === "plan" ? ensurePlanReady : ensureDiagnosisReady;
@@ -63,6 +62,20 @@ export default function EditorApp() {
   }, [screen]);
 
   useEffect(() => {
+    // Auth guard: editor shell requires `editor` role specifically.
+    // Unauthenticated → /login. Authenticated as client → / (the
+    // client view, where they belong). Authenticated as editor → boot.
+    const stored = getStoredAuth();
+    if (!stored?.token) {
+      redirectToLogin();
+      return;
+    }
+    if (stored.role !== "editor") {
+      redirectToClient();
+      return;
+    }
+    setAuth(stored);
+    setUnauthorizedHandler(redirectToLogin);
     reload();
   }, [reload]);
 
@@ -144,10 +157,14 @@ export default function EditorApp() {
     onUnsuppress: handleUnsuppress,
   };
 
+  // While auth check is resolving (or redirect in flight), render nothing.
+  // Avoids a flash of editor chrome before the redirect lands.
+  if (!auth) return null;
+
   return (
     <div style={{ minHeight: "100vh", background: t.color.canvas, fontFamily: t.font.body }}>
       <GlobalStyles />
-      <EditorHeader counts={counts} currentScreen={screen} />
+      <EditorHeader counts={counts} currentScreen={screen} auth={auth} />
 
       {state.status === "loading" && <LoadingView />}
       {state.status === "error" && <ErrorView error={state.error} />}
@@ -194,7 +211,7 @@ export default function EditorApp() {
  * single-page mode toggle risks accidentally publishing unsaved edits
  * or confusing the author about which surface they're in.
  */
-function EditorHeader({ counts, currentScreen = "diagnosis" }) {
+function EditorHeader({ counts, currentScreen = "diagnosis", auth = null }) {
   return (
     <header
       style={{
@@ -297,9 +314,59 @@ function EditorHeader({ counts, currentScreen = "diagnosis" }) {
             <Eye size={14} strokeWidth={1.75} />
             Preview as client
           </a>
+          {auth && <EditorUserChip auth={auth} />}
         </div>
       </div>
     </header>
+  );
+}
+
+/**
+ * EditorUserChip — username + role pill + sign-out for the editor header.
+ *
+ * Mirrors the client-side UserChip but adapted to the editor header's
+ * sunken background (slightly different contrast targets).
+ */
+function EditorUserChip({ auth }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: t.space[3],
+        paddingLeft: t.space[4],
+        marginLeft: t.space[2],
+        borderLeft: `1px solid ${t.color.borderFaint}`,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: t.space[2] }}>
+        <span
+          style={{
+            fontFamily: t.font.body,
+            fontSize: t.size.xs,
+            fontWeight: t.weight.medium,
+            color: t.color.textSecondary,
+          }}
+        >
+          {auth.username}
+        </span>
+      </div>
+      <button
+        onClick={logout}
+        style={{
+          background: "none",
+          border: "none",
+          padding: 0,
+          fontFamily: t.font.body,
+          fontSize: t.size.xs,
+          color: t.color.accent,
+          cursor: "pointer",
+          fontWeight: t.weight.medium,
+        }}
+      >
+        Sign out
+      </button>
+    </div>
   );
 }
 

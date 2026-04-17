@@ -25,6 +25,8 @@ export default defineConfig({
         client: resolve(__dirname, 'index-client.html'),
         // The EY editor — curation overlay on the same Diagnosis surface
         editor: resolve(__dirname, 'index-editor.html'),
+        // Login page — entry point before client/editor apps load
+        login: resolve(__dirname, 'index-login.html'),
       },
     },
   },

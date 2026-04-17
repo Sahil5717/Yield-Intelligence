@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { tokens as t } from "./tokens.js";
-import { ensureDiagnosisReady, ensurePlanReady } from "./api.js";
+import { ensureDiagnosisReady, ensurePlanReady, getStoredAuth, setUnauthorizedHandler, logout } from "./api.js";
 import { Diagnosis } from "./screens/Diagnosis.jsx";
 import { Plan } from "./screens/Plan.jsx";
 
@@ -13,10 +13,15 @@ import { Plan } from "./screens/Plan.jsx";
  * view cannot accidentally edit anything because it has no edit handlers
  * to pass to the screen.
  *
+ * Auth guard (v18e): on mount, checks localStorage for a valid auth
+ * token. If none exists, redirects to /login. Both `editor` and `client`
+ * roles are permitted to view this shell — editors use it for preview.
+ * If the backend ever returns 401 (expired token, revoked user), the
+ * api layer clears storage and triggers a redirect via the handler
+ * registered in setUnauthorizedHandler.
+ *
  * Screen routing: reads ?screen= from the URL. Values: "diagnosis"
- * (default), "plan". This is a temporary routing mechanism; Session C
- * adds a real nav bar that updates the URL on click. For now you can
- * hit /index-client.html?screen=plan to see the Plan screen.
+ * (default), "plan".
  *
  * For the EY-facing editor version, see EditorApp.jsx.
  */
@@ -27,11 +32,31 @@ function getScreenFromUrl() {
   return s === "plan" ? "plan" : "diagnosis";
 }
 
+function redirectToLogin() {
+  if (typeof window !== "undefined") {
+    // Preserve the intended screen as a post-login hint, wire-in later
+    window.location.href = "/login";
+  }
+}
+
 export default function DiagnosisApp() {
   const screen = getScreenFromUrl();
   const [state, setState] = useState({ status: "loading", data: null, error: null });
+  const [auth, setAuth] = useState(null);
 
   useEffect(() => {
+    // Auth guard: require any valid token. Both editor and client roles
+    // are allowed on this shell (editor uses it for "Preview as client").
+    const stored = getStoredAuth();
+    if (!stored?.token) {
+      redirectToLogin();
+      return;
+    }
+    setAuth(stored);
+
+    // Register 401 handler so expired-token responses redirect cleanly
+    setUnauthorizedHandler(redirectToLogin);
+
     (async () => {
       const loader = screen === "plan" ? ensurePlanReady : ensureDiagnosisReady;
       const { data, error } = await loader("client");
@@ -43,10 +68,14 @@ export default function DiagnosisApp() {
     })();
   }, [screen]);
 
+  // While redirecting, render nothing (avoids a flash of the shell chrome
+  // before window.location.href takes effect).
+  if (!auth) return null;
+
   return (
     <div style={{ minHeight: "100vh", background: t.color.canvas, fontFamily: t.font.body }}>
       <GlobalStyles />
-      <Header currentScreen={screen} />
+      <Header currentScreen={screen} auth={auth} />
 
       {state.status === "loading" && <LoadingView />}
       {state.status === "error" && <ErrorView error={state.error} />}
@@ -100,7 +129,7 @@ function GlobalStyles() {
  * more screens ship (Scenarios, Channel Deep Dive) we can promote this
  * to a proper tab bar.
  */
-function Header({ currentScreen = "diagnosis" }) {
+function Header({ currentScreen = "diagnosis", auth = null }) {
   return (
     <header
       style={{
@@ -156,19 +185,69 @@ function Header({ currentScreen = "diagnosis" }) {
           }}
         >
           <span>Demo Client · FY 2025</span>
-          <span
-            style={{
-              width: "6px",
-              height: "6px",
-              borderRadius: "50%",
-              background: t.color.positive,
-              display: "inline-block",
-            }}
-            title="Analysis current"
-          />
+          {auth && <UserChip auth={auth} />}
         </div>
       </div>
     </header>
+  );
+}
+
+/**
+ * UserChip — signed-in user indicator with a Sign out action.
+ *
+ * Deliberately plain — a username in the muted tone of the rest of the
+ * header metadata, with a small "Sign out" link beside it. No dropdown
+ * menu, no avatar, no dot indicator — there's only one user action
+ * (sign out) so hiding it behind a menu toggle would be friction
+ * without benefit.
+ */
+function UserChip({ auth }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: t.space[3] }}>
+      <div style={{ display: "flex", alignItems: "center", gap: t.space[2] }}>
+        <span
+          style={{
+            fontFamily: t.font.body,
+            fontSize: t.size.xs,
+            fontWeight: t.weight.medium,
+            color: t.color.textSecondary,
+          }}
+        >
+          {auth.username}
+        </span>
+        <span
+          style={{
+            fontFamily: t.font.body,
+            fontSize: t.size.xs,
+            fontWeight: t.weight.semibold,
+            color: t.color.textTertiary,
+            textTransform: "uppercase",
+            letterSpacing: t.tracking.wider,
+            padding: `2px ${t.space[2]}`,
+            borderRadius: t.radius.sm,
+            background: t.color.surfaceSunken,
+            border: `1px solid ${t.color.borderFaint}`,
+          }}
+        >
+          {auth.role}
+        </span>
+      </div>
+      <button
+        onClick={logout}
+        style={{
+          background: "none",
+          border: "none",
+          padding: 0,
+          fontFamily: t.font.body,
+          fontSize: t.size.xs,
+          color: t.color.accent,
+          cursor: "pointer",
+          fontWeight: t.weight.medium,
+        }}
+      >
+        Sign out
+      </button>
+    </div>
   );
 }
 

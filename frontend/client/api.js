@@ -11,16 +11,72 @@
  * - Error states carry a human-readable message suitable for UI display.
  * - Network errors and HTTP errors are reported distinctly so the UI can
  *   differentiate "can't reach server" vs "server returned 400."
+ *
+ * Auth (v18e): every request attaches the stored JWT as
+ * `Authorization: Bearer <token>` if a token is present. Token lives in
+ * localStorage under `marketlens:auth:v1` as a JSON blob with
+ * { token, username, role, expiresAt }. A 401 response anywhere clears
+ * the token and (via a pluggable onUnauthorized callback set by the app
+ * shell) redirects to /login. A 403 indicates wrong role — surfaced as a
+ * normal error, not a logout trigger, because the token is still valid.
  */
 
 const API_BASE = "/api";
+const AUTH_STORAGE_KEY = "marketlens:auth:v1";
+
+// The app shell sets this callback (see DiagnosisApp / EditorApp / LoginApp)
+// so api.js can trigger a redirect to /login without knowing about React
+// routing. Kept as a simple module-level variable rather than a more
+// elaborate event bus; there's one React tree at a time.
+let _onUnauthorized = null;
+
+export function setUnauthorizedHandler(fn) {
+  _onUnauthorized = fn;
+}
+
+// ─── Auth token storage ───
+//
+// localStorage is intentionally used rather than sessionStorage: a pitch
+// demo often involves showing the tool, closing the tab, coming back a
+// few minutes later. Keeping the token in localStorage survives that.
+// The JWT has a 24-hour expiry enforced server-side regardless.
+
+export function getStoredAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Don't hand back clearly expired tokens; treat as no auth.
+    if (parsed.expiresAt && parsed.expiresAt < Date.now()) {
+      clearStoredAuth();
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredAuth(auth) {
+  // auth = { token, username, role }  — we add expiresAt client-side as
+  // a best-effort (23h window; server enforces the real 24h expiry)
+  const enriched = { ...auth, expiresAt: Date.now() + 23 * 60 * 60 * 1000 };
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(enriched));
+}
+
+export function clearStoredAuth() {
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+}
 
 async function apiRequest(endpoint, options = {}) {
+  const auth = getStoredAuth();
+  const headers = {
+    "Content-Type": "application/json",
+    ...(auth?.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+    ...options.headers,
+  };
   try {
-    const res = await fetch(`${API_BASE}${endpoint}`, {
-      headers: { "Content-Type": "application/json", ...options.headers },
-      ...options,
-    });
+    const res = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
     if (!res.ok) {
       let detail = `Request failed with status ${res.status}`;
       try {
@@ -28,6 +84,12 @@ async function apiRequest(endpoint, options = {}) {
         if (body.detail) detail = body.detail;
       } catch {
         // Response wasn't JSON. Stick with the status-code message.
+      }
+      // 401 → token missing/expired/invalid. Clear local auth and notify
+      // the app shell (which will redirect to /login).
+      if (res.status === 401) {
+        clearStoredAuth();
+        if (_onUnauthorized) _onUnauthorized();
       }
       return { data: null, error: { kind: "http", status: res.status, message: detail } };
     }
@@ -39,6 +101,32 @@ async function apiRequest(endpoint, options = {}) {
       error: { kind: "network", message: e.message || "Network error" },
     };
   }
+}
+
+// ─── Auth endpoints ───
+
+export async function fetchDemoUsers() {
+  return apiRequest("/auth/demo-users");
+}
+
+export async function login(username, password) {
+  const result = await apiRequest("/auth/login-v2", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+  if (result.data) {
+    setStoredAuth({
+      token: result.data.token,
+      username: result.data.username,
+      role: result.data.role,
+    });
+  }
+  return result;
+}
+
+export function logout() {
+  clearStoredAuth();
+  if (_onUnauthorized) _onUnauthorized();
 }
 
 export async function fetchDiagnosis(view = "client") {

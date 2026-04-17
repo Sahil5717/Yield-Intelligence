@@ -16,7 +16,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 
 # Auth & persistence
-from auth import register_user, login_user, get_current_user, require_role, check_permission
+from auth import register_user, login_user, get_current_user, require_role, require_editor, check_permission
 from persistence import init_db, save_session, load_session, save_scenario, list_scenarios, load_scenario, compare_scenarios
 
 # ═══ CORRECTED IMPORTS — matching upgraded engine function names ═══
@@ -43,6 +43,28 @@ from engines.automated_recs import automated_recommendations, check_model_drift,
 
 app = FastAPI(title="Marketing ROI & Budget Optimization Engine", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.on_event("startup")
+def _startup_seed_demo_users():
+    """
+    Seed the MarketLens demo users on server boot so fresh deploys
+    (including Railway, Docker, or any clean sqlite start) have valid
+    credentials available immediately.
+
+    Idempotent — safe to run on every boot; existing users are skipped.
+    If seeding fails for any reason (e.g., DB not yet initialized),
+    the error is logged but doesn't block server startup.
+    """
+    try:
+        from auth import seed_demo_users
+        seed_demo_users()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Demo user seeding failed at startup: %s — users can be created "
+            "manually via /api/auth/register if needed.", e,
+        )
 
 from engines.data_splitter import split_data, validate_split
 from engines.insights import generate_insights, compute_qoq_yoy_trends, generate_smart_recommendations
@@ -112,8 +134,11 @@ def _get_data_warnings():
 #  CORE ENDPOINTS
 # ═══════════════════════════════════════════════
 
-@app.get("/")
-def root():
+@app.get("/api/status")
+def api_status():
+    """Engine status JSON. Moved from `/` to `/api/status` in v18c so
+    that `/` can serve the MarketLens client HTML. Kept because some
+    monitoring or smoke-test scripts may depend on it."""
     return {"status": "ok", "engine": "Marketing ROI & Budget Optimization Engine v2.0",
             "engines_loaded": True, "api_version": "2.0"}
 
@@ -1007,53 +1032,65 @@ def _engagement_id_param(engagement_id: Optional[str]) -> str:
 
 
 @app.post("/api/editor/commentary")
-def editor_set_commentary(body: CommentaryPayload, engagement_id: Optional[str] = None):
-    """Create or replace EY commentary for a finding."""
+def editor_set_commentary(body: CommentaryPayload,
+                          engagement_id: Optional[str] = None,
+                          user=Depends(require_editor)):
+    """Create or replace EY commentary for a finding. Requires editor role.
+    Author is taken from the authenticated user's token, not the request
+    body — clients cannot forge authorship."""
     from persistence import set_commentary
     eid = _engagement_id_param(engagement_id)
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(400, "Commentary text cannot be empty. Use DELETE to remove.")
-    set_commentary(eid, body.finding_key, text, author=body.author)
+    set_commentary(eid, body.finding_key, text, author=user["username"])
     return _j({"ok": True, "finding_key": body.finding_key})
 
 
 @app.delete("/api/editor/commentary/{finding_key:path}")
-def editor_delete_commentary(finding_key: str, engagement_id: Optional[str] = None,
-                              author: Optional[str] = None):
-    """Remove EY commentary for a finding."""
+def editor_delete_commentary(finding_key: str,
+                              engagement_id: Optional[str] = None,
+                              user=Depends(require_editor)):
+    """Remove EY commentary for a finding. Requires editor role."""
     from persistence import delete_commentary
     eid = _engagement_id_param(engagement_id)
-    deleted = delete_commentary(eid, finding_key, author=author)
+    deleted = delete_commentary(eid, finding_key, author=user["username"])
     return _j({"ok": True, "deleted": deleted, "finding_key": finding_key})
 
 
 @app.post("/api/editor/suppress")
-def editor_suppress_finding(body: SuppressionPayload, engagement_id: Optional[str] = None):
-    """Mark a finding as hidden from the client view. Reason is required."""
+def editor_suppress_finding(body: SuppressionPayload,
+                            engagement_id: Optional[str] = None,
+                            user=Depends(require_editor)):
+    """Mark a finding as hidden from the client view. Reason is required.
+    Requires editor role."""
     from persistence import suppress_finding
     eid = _engagement_id_param(engagement_id)
     reason = (body.reason or "").strip()
     if not reason:
         raise HTTPException(400, "A reason is required to suppress a finding (for audit).")
-    suppress_finding(eid, body.finding_key, reason, author=body.author)
+    suppress_finding(eid, body.finding_key, reason, author=user["username"])
     return _j({"ok": True, "finding_key": body.finding_key})
 
 
 @app.delete("/api/editor/suppress/{finding_key:path}")
-def editor_unsuppress_finding(finding_key: str, engagement_id: Optional[str] = None,
-                               author: Optional[str] = None):
-    """Restore a previously suppressed finding to the client view."""
+def editor_unsuppress_finding(finding_key: str,
+                               engagement_id: Optional[str] = None,
+                               user=Depends(require_editor)):
+    """Restore a previously suppressed finding to the client view.
+    Requires editor role."""
     from persistence import unsuppress_finding
     eid = _engagement_id_param(engagement_id)
-    deleted = unsuppress_finding(eid, finding_key, author=author)
+    deleted = unsuppress_finding(eid, finding_key, author=user["username"])
     return _j({"ok": True, "deleted": deleted, "finding_key": finding_key})
 
 
 @app.post("/api/editor/rewrite")
-def editor_set_rewrite(body: RewritePayload, engagement_id: Optional[str] = None):
+def editor_set_rewrite(body: RewritePayload,
+                       engagement_id: Optional[str] = None,
+                       user=Depends(require_editor)):
     """Save a text rewrite for a finding field (headline/narrative/prescribed_action).
-    Schema-ready in v18a; UI wired in v18b."""
+    Requires editor role. Schema-ready in v18a; UI wired in v18b+."""
     from persistence import set_rewrite
     eid = _engagement_id_param(engagement_id)
     if body.field not in ("headline", "narrative", "prescribed_action"):
@@ -1061,27 +1098,30 @@ def editor_set_rewrite(body: RewritePayload, engagement_id: Optional[str] = None
     if not (body.rewritten or "").strip():
         raise HTTPException(400, "Rewritten text cannot be empty. Use DELETE to revert.")
     set_rewrite(eid, body.finding_key, body.field, body.original, body.rewritten,
-                author=body.author)
+                author=user["username"])
     return _j({"ok": True, "finding_key": body.finding_key, "field": body.field})
 
 
 @app.delete("/api/editor/rewrite/{finding_key:path}/{field}")
 def editor_delete_rewrite(finding_key: str, field: str,
                            engagement_id: Optional[str] = None,
-                           author: Optional[str] = None):
-    """Revert a rewrite back to the generated text."""
+                           user=Depends(require_editor)):
+    """Revert a rewrite back to the generated text. Requires editor role."""
     from persistence import delete_rewrite
     eid = _engagement_id_param(engagement_id)
-    deleted = delete_rewrite(eid, finding_key, field, author=author)
+    deleted = delete_rewrite(eid, finding_key, field, author=user["username"])
     return _j({"ok": True, "deleted": deleted, "finding_key": finding_key, "field": field})
 
 
 @app.get("/api/editor/audit-log")
-def editor_get_audit_log(engagement_id: Optional[str] = None, limit: int = 50):
-    """Return recent audit log entries for an engagement."""
+def editor_get_audit_log(engagement_id: Optional[str] = None, limit: int = 50,
+                          user=Depends(require_editor)):
+    """Return recent audit log entries. Requires editor role — a client
+    user viewing audit logs would reveal which findings were suppressed
+    and why, defeating the point of suppression."""
     from persistence import get_audit_log
     eid = _engagement_id_param(engagement_id)
-    limit = max(1, min(500, limit))  # clamp
+    limit = max(1, min(500, limit))
     return _j({"engagement_id": eid, "entries": get_audit_log(eid, limit)})
 
 
@@ -1261,23 +1301,45 @@ def get_model_health():
 # ═══════════════════════════════════════════════
 #  FRONTEND SERVING
 # ═══════════════════════════════════════════════
+# Actual serving logic is at the bottom of this file (needs to be registered
+# AFTER all API routes so the catch-all HTML routes don't intercept /api/*).
 
 from starlette.staticfiles import StaticFiles
 
-frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 # ═══════════════════════════════════════════════════════
 #  AUTH ENDPOINTS
 # ═══════════════════════════════════════════════════════
 
 @app.post("/api/auth/register")
 def api_register(username: str, password: str, role: str = "analyst"):
-    """Register a new user. Returns JWT token."""
+    """Register a new user (legacy query-param form, kept for analyst app).
+    Returns JWT token. Note: passwords in URLs are bad practice; MarketLens
+    login uses /api/auth/login-v2 with a JSON body instead."""
     return _j(register_user(username, password, role))
 
 @app.post("/api/auth/login")
 def api_login(username: str, password: str):
-    """Login and get JWT token."""
+    """Login (legacy query-param form, kept for analyst app)."""
     return _j(login_user(username, password))
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/login-v2")
+def api_login_v2(body: LoginPayload):
+    """
+    Login with JSON body (MarketLens login screen uses this).
+
+    Returns { user_id, username, role, token } on success or a 401 with
+    a descriptive error on failure. The token is a JWT; the frontend
+    stores it and attaches it as `Authorization: Bearer <token>` on
+    subsequent requests.
+    """
+    return _j(login_user(body.username, body.password))
+
 
 @app.get("/api/auth/me")
 async def api_me(user=Depends(get_current_user)):
@@ -1285,6 +1347,18 @@ async def api_me(user=Depends(get_current_user)):
     if user is None:
         return _j({"authenticated": False, "role": "anonymous"})
     return _j({"authenticated": True, "user_id": user["id"], "username": user["username"], "role": user["role"]})
+
+
+@app.get("/api/auth/demo-users")
+def api_demo_users():
+    """
+    Return the list of seeded demo credentials for the login screen to
+    display. In a production (non-demo) deployment, set the environment
+    variable MARKETLENS_HIDE_DEMO_CREDS=1 and this endpoint returns
+    an empty list — the login screen just shows the form with no hints.
+    """
+    from auth import get_demo_credentials_for_login_page
+    return _j({"demo_users": get_demo_credentials_for_login_page()})
 
 
 # ═══════════════════════════════════════════════════════
@@ -1379,22 +1453,115 @@ def api_compare_scenarios(ids: str):
 # ═══════════════════════════════════════════════════════
 #  STATIC FILES & FRONTEND
 # ═══════════════════════════════════════════════════════
+#
+# Serves the Vite-built frontend from /app/frontend-dist/. The Dockerfile
+# runs `npm run build` at image-build time producing three HTML entries
+# and their JS/CSS assets in this directory.
+#
+# Route layout:
+#   GET /                        → MarketLens client (Diagnosis default view)
+#   GET /editor                  → MarketLens editor
+#   GET /analyst                 → Legacy analyst workbench (kept for v17 parity)
+#   GET /index-client.html       → MarketLens client (direct path)
+#   GET /index-editor.html       → MarketLens editor (direct path)
+#   GET /assets/...              → JS/CSS bundles
+#   GET /main-client.jsx, etc.   → (dev only; production paths are /assets/)
+#
+# The direct `/index-client.html` path is what the editor's "Preview as
+# client" link uses, so it must work. The friendly `/` and `/editor`
+# aliases make the deployed URL shareable ("marketlens.railway.app/editor").
 
-if not os.path.isdir(frontend_dir):
-    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+# Locate frontend-dist. In the Docker image it lives at /app/frontend-dist/.
+# In local dev from the backend directory, it's ../frontend-dist/.
+_candidate_dist_paths = [
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend-dist"),
+    os.path.join(os.path.dirname(__file__), "..", "frontend-dist"),
+    "/app/frontend-dist",
+]
+frontend_dist_dir = next(
+    (p for p in _candidate_dist_paths if os.path.isdir(p)),
+    None,
+)
 
-try:
-    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
-except Exception:
-    pass
+if frontend_dist_dir:
+    # Mount the assets directory so hashed JS/CSS bundles are reachable.
+    # Vite outputs references like `/assets/client-xyz.js` in the HTML,
+    # so this exact mount path is required — not negotiable.
+    assets_dir = os.path.join(frontend_dist_dir, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-@app.get("/app", response_class=HTMLResponse)
-def serve_frontend():
-    for p in [os.path.join(frontend_dir, "index.html"),
-              os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")]:
-        if os.path.exists(p):
-            with open(p) as f: return HTMLResponse(f.read())
-    return HTMLResponse("<h1>Frontend not found</h1>", status_code=404)
+    # Also keep the /static mount pointing at the built output, in case
+    # anything in the codebase still references /static/* paths.
+    app.mount("/static", StaticFiles(directory=frontend_dist_dir), name="static")
+
+    def _serve_html(filename: str) -> HTMLResponse:
+        """Read and serve an HTML file from frontend-dist."""
+        path = os.path.join(frontend_dist_dir, filename)
+        if not os.path.exists(path):
+            return HTMLResponse(
+                f"<h1>{filename} not found in build output</h1>"
+                f"<p>Expected at: {path}</p>",
+                status_code=404,
+            )
+        with open(path) as f:
+            return HTMLResponse(f.read())
+
+    @app.get("/", response_class=HTMLResponse)
+    def serve_root():
+        """Default route → MarketLens client (Diagnosis view)."""
+        return _serve_html("index-client.html")
+
+    @app.get("/login", response_class=HTMLResponse)
+    def serve_login_friendly():
+        """Login page — single entry point before routing to client or editor."""
+        return _serve_html("index-login.html")
+
+    @app.get("/editor", response_class=HTMLResponse)
+    def serve_editor_friendly():
+        """Friendly path for the editor: /editor → MarketLens editor."""
+        return _serve_html("index-editor.html")
+
+    @app.get("/analyst", response_class=HTMLResponse)
+    def serve_analyst_friendly():
+        """Friendly path for the legacy analyst workbench (kept for parity)."""
+        return _serve_html("index-vite.html")
+
+    @app.get("/index-client.html", response_class=HTMLResponse)
+    def serve_client_direct():
+        """Direct path used by the editor's 'Preview as client' link."""
+        return _serve_html("index-client.html")
+
+    @app.get("/index-editor.html", response_class=HTMLResponse)
+    def serve_editor_direct():
+        return _serve_html("index-editor.html")
+
+    @app.get("/index-login.html", response_class=HTMLResponse)
+    def serve_login_direct():
+        return _serve_html("index-login.html")
+
+    @app.get("/index-vite.html", response_class=HTMLResponse)
+    def serve_analyst_direct():
+        return _serve_html("index-vite.html")
+
+    # Preserve the /app route from earlier versions for any existing links
+    @app.get("/app", response_class=HTMLResponse)
+    def serve_app_legacy():
+        return _serve_html("index-vite.html")
+
+else:
+    # Dev mode fallback: frontend-dist/ doesn't exist (running backend
+    # without building frontend). Explain the problem rather than returning
+    # opaque 404s.
+    @app.get("/", response_class=HTMLResponse)
+    def serve_root_no_build():
+        return HTMLResponse(
+            "<h1>Frontend not built</h1>"
+            "<p>Run <code>cd frontend && npm run build</code> to produce "
+            "frontend-dist/, or run <code>npm run dev</code> alongside this "
+            "server on port 3000 for development.</p>",
+            status_code=503,
+        )
 
 
 if __name__ == "__main__":

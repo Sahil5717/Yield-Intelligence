@@ -141,6 +141,425 @@ before fetching `/api/diagnosis`.
 
 ---
 
+# CHANGES — v18e (Auth + RBAC: editor / client roles, login screen, route guards)
+
+The pitch tool now has actual authentication. Four pre-seeded demo users
+(two editor-role, two client-role), a login screen, JWT-based sessions,
+and role-protected editor endpoints. The client/editor split moves from
+"convention based on which URL you visit" to "security property based on
+which role your token carries."
+
+No engine or feature regressions. All 107 tests still pass.
+
+## What changed
+
+### `backend/auth.py` — new role model + demo seeding
+
+Replaced the legacy `admin/analyst/viewer` role triplet with two
+MarketLens-specific roles:
+
+- **`editor`** — EY analysts and partners. Full edit access to commentary,
+  suppression, rewrites, audit log. Can preview the client view.
+- **`client`** — Client executives and analysts. Read-only access to
+  the published client-view output. Cannot see audit log or suppressed
+  findings.
+
+The legacy roles stay in the `ROLE_PERMISSIONS` map so the existing
+analyst workbench keeps working with its own tokens — backward
+compatible.
+
+Added `seed_demo_users()` which creates four accounts on first boot:
+ey.partner, ey.analyst (both editor); client.cmo, client.analyst (both
+client). Idempotent — safe to call on every startup. All passwords
+"demo1234" — pitch-tool only, MUST change before real client data.
+
+Added `get_demo_credentials_for_login_page()` which the login screen
+calls to render its credential hints. Set environment variable
+`MARKETLENS_HIDE_DEMO_CREDS=1` to make this return empty (production
+mode), which collapses the credential-hints section on the login UI
+to nothing.
+
+Added convenience dependency `require_editor` so `/api/editor/*`
+endpoint signatures express their role requirement clearly:
+
+```python
+@app.post("/api/editor/commentary")
+def editor_set_commentary(body, user=Depends(require_editor)):
+    ...
+```
+
+### `backend/api.py` — auth-protected editor endpoints + login
+
+All seven `/api/editor/*` endpoints now require `editor` role via
+`Depends(require_editor)`. Pre-v18e, anyone who could reach the URL
+could mutate overlay state. Now:
+- Unauthenticated request → `401 Authentication required`
+- Authenticated as client → `403 Requires role: editor`
+- Authenticated as editor → `200` with action performed
+
+**Author attribution fixed.** Previously the editor endpoints accepted
+an `author` field from the request body — which a malicious client
+could forge ("save commentary authored by ey.partner"). The author is
+now derived from the authenticated user's JWT, not the request body.
+Requests pass `author=user["username"]` to persistence; the body's
+author field, if present, is silently ignored.
+
+New endpoints:
+- `POST /api/auth/login-v2` — JSON body login (the legacy `/api/auth/login`
+  takes credentials as URL query params, which is bad practice;
+  preserved for the analyst workbench but not used by MarketLens)
+- `GET /api/auth/demo-users` — returns demo credentials for the login UI
+- `GET /login` and `GET /index-login.html` — serve the login HTML
+
+`@app.on_event("startup")` hook calls `seed_demo_users()` so a fresh
+deploy (Railway, Docker, clean sqlite) has valid credentials available
+immediately. Errors during seeding are logged but don't block startup.
+
+### `frontend/client/api.js` — token-aware fetch + login helpers
+
+Every API call now attaches `Authorization: Bearer <token>` automatically
+if a stored token exists. Token lives in localStorage under
+`marketlens:auth:v1` as a JSON blob `{ token, username, role, expiresAt }`.
+
+A 401 response from any endpoint:
+1. Clears the stored token
+2. Calls the `_onUnauthorized` handler (set by app shells via
+   `setUnauthorizedHandler(fn)`) which redirects to `/login`
+
+This means an expired token mid-session lands the user back at login
+cleanly rather than producing a stack of failed requests in console.
+
+New helpers:
+- `getStoredAuth()` / `setStoredAuth()` / `clearStoredAuth()` — token storage
+- `setUnauthorizedHandler(fn)` — register the redirect callback
+- `login(username, password)` — POST to /api/auth/login-v2 + persist token
+- `logout()` — clear token + trigger redirect
+- `fetchDemoUsers()` — for the login screen's credential hints
+
+### `frontend/client/screens/LoginScreen.jsx` — NEW
+
+Centered card with the wordmark, username/password form, and a
+"Demo credentials" panel below. Each demo credential is a button —
+click it, the form auto-fills, then click Sign in. Faster than typing
+"client.analyst" + "demo1234" eight times during testing.
+
+After successful login: `editor` role redirects to `/editor`, `client`
+role redirects to `/`. Both routes carry the user into the appropriate
+shell which uses the same auth token to fetch its data.
+
+Visual language matches MarketLens: warm off-white canvas, Geist
+typography, teal accent, restrained styling. No "MarketLens · Sign in
+to Insights for Modern Marketing" marketing fluff — just brand,
+form, demo credentials.
+
+### `frontend/client/LoginApp.jsx` + `main-login.jsx` + `index-login.html` — NEW
+
+Standard entry point trio matching the existing client/editor pattern.
+Vite config adds `login` as a fourth rollup input.
+
+### `frontend/client/DiagnosisApp.jsx` + `EditorApp.jsx` — auth guards
+
+Both shells now check for a stored auth token on mount before fetching
+data. Behavior:
+
+**Client shell (`DiagnosisApp` at `/`):**
+- No token → redirect to `/login`
+- Has token (any role) → boot
+- 401 mid-session → token cleared, redirect to `/login`
+
+**Editor shell (`EditorApp` at `/editor`):**
+- No token → redirect to `/login`
+- Token with `client` role → redirect to `/` (they're authenticated,
+  just not authorized for this surface)
+- Token with `editor` role → boot
+- 401 mid-session → redirect to `/login`
+
+This makes the URL split a real security boundary, not just a UX one.
+A client-role user typing `/editor` into the URL bar lands back at `/`.
+
+### Header changes — UserChip with sign-out
+
+Both client and editor headers now show the signed-in username with a
+small role pill and a "Sign out" link. Plain text, no dropdown menu —
+there's only one auth action available, so a menu would be friction.
+
+Editor header: username + sign-out next to "Preview as client" link.
+Client header: replaced the green "analysis current" dot with the
+user chip (the dot was decorative anyway).
+
+## What's verified end-to-end this session
+
+```
+[OK] Login as ey.partner → editor token issued, role=editor
+[OK] Login as client.cmo → client token issued, role=client
+[OK] Wrong password → 401 (no account enumeration leak)
+[OK] /api/editor/commentary without auth → 401
+[OK] /api/editor/commentary with client token → 403
+[OK] /api/editor/commentary with editor token → 200, audit author = "ey.partner"
+[OK] Audit log read with client token → 403
+[OK] All 6 frontend routes serve correctly:
+       / /login /editor /index-login.html
+       /api/auth/demo-users /api/status
+[OK] Build produces 4 HTML entries + login bundle (1.77 KB gzipped)
+[OK] All 107 tests pass
+```
+
+## Demo flow (what the Partner sees)
+
+1. Visit `https://your-app.railway.app/`
+2. Redirected to `/login` (no token in localStorage)
+3. See the login screen with 4 demo credential buttons listed
+4. Click `ey.partner` → form auto-fills → click Sign in
+5. Redirected to `/editor` — full editor mode with auth attribution
+6. Add commentary; the audit log records "ey.partner" as the author
+7. Click "Preview as client" link in editor header → opens `/` in new tab
+8. New tab shows client view with the editor's commentary rendered as
+   "EY's Take" boxes
+9. Sign out from either tab returns to `/login`
+
+To demo "what does a client see when they log in": sign out, log in as
+`client.cmo`, observe the editor link is unreachable (you'll be
+redirected back if you try `/editor`).
+
+## Known issues to flag
+
+- **Still not visually verified in browser.** Auth + login screen +
+  user chips all built without rendering once. Same caveat as v18b/c/d.
+  This is now blocking — please run a local check before Session B.
+- **JWT_SECRET defaults to a dev string.** In production set
+  `JWT_SECRET=<long-random-string>` as an env var on Railway. The
+  current default is documented as "change in production" but the
+  environment variable check happens at module import, not at runtime.
+- **Token expiry is 24 hours.** No refresh token. After 24h, user
+  re-logins. Fine for a pitch tool; would need a refresh-token flow for
+  real production.
+- **No "lock screen" between sessions.** A user who closes their laptop
+  and reopens it within 24 hours stays logged in. Standard SaaS
+  behavior; flagging in case you want session-per-tab semantics.
+- **The legacy analyst workbench is unaffected** — still uses the
+  legacy roles (admin/analyst/viewer) and the legacy `/api/auth/login`
+  endpoint. No login screen for it; analysts who want to use it can
+  POST credentials directly to register/login.
+
+## What's still ahead
+
+- **Session B: Scenarios screen.** What-if controls, side-by-side
+  allocation comparison.
+- **Session C: Navigation polish.** Promote screen routing from full-
+  reload links to client-side routing.
+- **Real database for auth in production.** sqlite on Railway is
+  ephemeral; demo users get re-seeded on every redeploy but anyone
+  who registered would be lost. Postgres + a real user-management
+  flow is the v19 territory.
+
+## Verification before pushing v18e to Railway
+
+```bash
+cd backend
+python test_integration.py             # 69/69
+python test_mmm_correctness.py          # 18/18
+python test_optimizer_correctness.py    # 20/20
+
+cd ../frontend
+npm install
+npm run build
+# Should produce 4 HTML entries: index-client, index-editor, index-vite,
+# index-login. Plus a small login bundle (~6 KB).
+
+cd ../backend
+python -m uvicorn api:app --port 8000 &
+
+# Confirm route layout
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/login
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/api/auth/demo-users
+
+# Confirm demo login works
+curl -s -X POST http://localhost:8000/api/auth/login-v2 \
+  -H "Content-Type: application/json" \
+  -d '{"username":"ey.partner","password":"demo1234"}'
+# Should return { user_id, username, role: "editor", token }
+```
+
+Once those pass, push to Railway. The Dockerfile from v18d already
+builds the frontend correctly; v18e adds a fourth HTML entry which is
+caught by the post-build verification step in the Dockerfile (which
+checks for index-client and index-editor specifically; index-login is
+served too but isn't in the verification list — could be added but
+not critical since a missing login HTML would fail at first request,
+not deploy).
+
+---
+
+# CHANGES — v18d (deploy fixes: Dockerfile + frontend-dist serving)
+
+Critical deploy correctness release. Without v18d, pushing v18c to Railway
+would have shipped an image that can't serve MarketLens:
+- The Dockerfile never ran `npm install` / `npm run build`, so
+  `frontend-dist/` didn't exist in the container
+- The `api.py` static-file mount pointed at the source `frontend/`
+  directory and served raw `.jsx` files that browsers can't execute
+- The `/` route returned a legacy JSON status endpoint, not HTML
+
+A user hitting the Railway URL would have gotten either a 404 at root
+or the old analyst workbench. MarketLens itself would not have rendered.
+
+This release makes the product actually deployable. Changes are all
+infrastructure — no engine or feature changes. Everything that worked
+locally in v18c works in v18d; now it also works in a Docker container
+behind an external domain.
+
+## What changed
+
+### `Dockerfile` — now builds the frontend
+
+Added Node.js 20 to the base image and a Vite build step:
+
+```dockerfile
+# New: Node 20 from NodeSource (alongside the existing Python toolchain)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs
+
+# New: npm ci with package-lock cached separately from source files
+# so the install layer caches across React code changes
+COPY frontend/package.json frontend/package-lock.json /app/frontend/
+WORKDIR /app/frontend
+RUN npm ci --no-audit --no-fund
+
+# After full source copy:
+WORKDIR /app/frontend
+RUN npm run build
+
+# Fail the image build if Vite didn't produce the three entry points
+RUN test -f /app/frontend-dist/index-client.html || exit 1
+RUN test -f /app/frontend-dist/index-editor.html || exit 1
+RUN test -d /app/frontend-dist/assets || exit 1
+```
+
+Image size implications: adds ~200MB for Node + npm + node_modules.
+Final image is now ~650MB vs. the previous ~450MB. Worth it — without
+the frontend, the backend has nothing to serve for a UI-facing product.
+
+The verification steps at the end (`RUN test -f ...`) fail the build
+immediately if Vite produces unexpected output. Catches regressions
+like "someone renamed an entry point" at build time rather than
+deploy time.
+
+### `backend/api.py` — serves `frontend-dist/` with sensible routes
+
+Rewrote the static-file block (was about 10 lines at the bottom) into
+a proper routing layer. Key additions:
+
+**Friendly paths** (shareable URLs):
+- `GET /` → MarketLens client (Diagnosis default view)
+- `GET /editor` → MarketLens editor
+- `GET /analyst` → Legacy analyst workbench
+
+**Direct paths** (preserved for the editor's "Preview as client" link
+and for anyone deep-linking):
+- `GET /index-client.html`
+- `GET /index-editor.html`
+- `GET /index-vite.html`
+- `GET /app` (legacy alias)
+
+**Assets:**
+- `GET /assets/...` — hashed JS/CSS bundles Vite references in the HTML
+
+The backend uses a candidate-path search (`/app/frontend-dist`, relative
+paths, etc.) so it works identically in Docker, in local dev from the
+backend directory, and in a packaged zip. If no `frontend-dist/` exists,
+serves a helpful 503 explaining that the frontend wasn't built.
+
+**Breaking change (minor):** the old `GET /` JSON status endpoint moved
+to `GET /api/status`. Anyone scripting against the old `/` for health
+monitoring should switch to `/api/status` or `/api/health` (both return
+JSON). All existing API routes under `/api/*` are unchanged.
+
+### Route verification (done locally this session)
+
+```
+GET /                              → 200  text/html
+GET /editor                        → 200  text/html
+GET /analyst                       → 200  text/html
+GET /index-client.html             → 200  text/html
+GET /api/status                    → 200  application/json
+GET /api/health                    → 200  application/json
+
+Assets referenced in / HTML (3 found):
+  /assets/client-CnXxc9tc.js:         200
+  /assets/createLucideIcon-*.js:      200
+  /assets/DiagnosisApp-*.js:          200
+```
+
+All 107 tests still pass.
+
+## What could still fail on Railway (worth knowing)
+
+**Docker build step I couldn't verify.** The sandbox doesn't have Docker
+installed, so I couldn't run `docker build` to prove the Dockerfile
+actually works. The Dockerfile looks correct by inspection (Node install
+follows the NodeSource pattern, npm ci is standard, copy order respects
+layer caching), but the first real test is Railway's build pipeline.
+
+If the Railway build fails, the likely suspects are:
+- NodeSource install issue (apt repo signing, DNS) — surface with clear
+  error message
+- `npm ci` failing because `package-lock.json` is incomplete — unlikely,
+  the current lock was generated from a working install
+- Vite build failing because a JSX import resolves differently in a
+  Linux container vs. macOS/Windows — possible but rare
+
+**What to do if it fails:** Check Railway's build log. The Dockerfile
+uses `set -e` implicitly (docker build's default), so the first failing
+command halts with a clear error. The verification RUN statements at
+the end of the build catch "frontend didn't produce expected files"
+before they cause runtime confusion.
+
+**Cold-start time.** On Railway's free tier, first request after idle
+takes ~30s for the Python process to warm up, plus another 20-40s for
+the cold-start data load + analysis pipeline. Subsequent requests are
+fast. Worth hitting the URL once before showing anyone.
+
+## Verification before pushing to Railway
+
+```bash
+# Locally confirm everything still works
+cd backend
+python test_integration.py          # 69/69
+python test_mmm_correctness.py       # 18/18
+python test_optimizer_correctness.py # 20/20
+
+cd ../frontend
+npm install
+npm run build
+# Should produce frontend-dist/ with index-client.html, index-editor.html,
+# index-vite.html, and assets/ subdirectory
+
+cd ../backend
+python -m uvicorn api:app --port 8000 &
+curl -s http://localhost:8000/ | grep -q MarketLens && echo "OK"
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/editor
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/api/status
+# All three should be 200
+```
+
+Once those pass, push to Railway. The Dockerfile will run `npm ci`,
+`npm run build`, and the verification checks automatically.
+
+## What v18d does NOT change
+
+- No new features — still the Diagnosis screen + Plan screen we had
+  in v18c
+- No auth added to editor endpoints (still a known gap — the URL split
+  is a convention, not a security property)
+- No scenarios screen yet (Session B of the roadmap)
+- No navigation polish (Session C of the roadmap)
+
+This release is purely "make the product deployable," not "make the
+product better." Both matter. v18c was useful on disk; v18d is useful
+on the internet.
+
+---
+
 # CHANGES — v18c (Plan screen — backend + frontend, end-to-end)
 
 Session A of the "pitch-critical three screens" plan (Path 2 from the
