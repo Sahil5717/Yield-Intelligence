@@ -88,7 +88,7 @@ endpoints = [
     ("GET", "/api/markov-attribution"), ("GET", "/api/forecast"), ("GET", "/api/cross-channel"),
     ("GET", "/api/shapley"),
     ("POST", "/api/optimize?total_budget=30000000"),
-    ("POST", "/api/adstock"), ("POST", "/api/run-analysis"), ("POST", "/api/mmm"),
+    ("POST", "/api/adstock"), ("POST", "/api/run-analysis"), ("POST", "/api/mmm?method=mle"),
 ]
 for m, ep in endpoints:
     r = client.get(ep) if m == "GET" else client.post(ep)
@@ -120,13 +120,28 @@ r = client.post("/api/optimize?total_budget=100&objective=balanced")
 o = r.json() if r.status_code == 200 else {}
 test("Tiny budget returns 200", r.status_code == 200)
 test("Tiny budget has valid structure", "channels" in o and "summary" in o)
-test("Tiny budget uplift is reasonable", o.get("summary", {}).get("uplift_pct", -1) >= 0)
+# Tiny budget ($100) is far below current spend (~$30M), so a negative uplift
+# is the CORRECT answer — the optimizer is being honest that cutting the budget
+# by 99.9% will reduce revenue. We only check the structure is coherent and
+# within plausible bounds (not NaN, not infinite).
+uplift = o.get("summary", {}).get("uplift_pct")
+test("Tiny budget uplift is a finite number",
+     isinstance(uplift, (int, float)) and not (uplift != uplift) and abs(uplift) < 1e6,  # NaN check + bound
+     f"got {uplift}")
 
-# Normal optimization should produce positive uplift
-r = client.post("/api/optimize?total_budget=30000000&objective=balanced")
+# Normal optimization should produce positive uplift when optimizing AT OR ABOVE
+# current spend (where reallocation is the task, not cutting). Mock data spend
+# varies session-to-session with the random seed, so we derive the test budget
+# from actual current spend rather than hardcoding $30M (which occasionally
+# fell below current and produced a correctly-negative uplift, causing flakes).
+full_state = client.get("/api/full-state").json()
+current_spend = float(full_state.get("tS", 30_000_000))
+# Add 5% to ensure we're at-or-above current; gives the optimizer room to show uplift.
+target_budget = current_spend * 1.05
+r = client.post(f"/api/optimize?total_budget={target_budget}&objective=balanced")
 o = r.json() if r.status_code == 200 else {}
-test("Normal budget produces positive uplift", o.get("summary", {}).get("uplift_pct", 0) > 0, 
-     f"got {o.get('summary', {}).get('uplift_pct')}")
+test("Normal budget produces positive uplift", o.get("summary", {}).get("uplift_pct", 0) > 0,
+     f"got {o.get('summary', {}).get('uplift_pct')} at budget ${target_budget:,.0f} vs current ${current_spend:,.0f}")
 
 # ──── RESULTS ────
 print(f"\n{'═'*50}")

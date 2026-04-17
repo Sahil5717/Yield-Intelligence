@@ -28,6 +28,70 @@ CHANNELS = {
     "direct_mail": {"type": "offline", "base_cpc": 5.5, "base_cvr": 0.025, "saturation_point": 60000},
 }
 
+
+# Target channel mix for a realistic mid-market/enterprise B2B portfolio.
+# Without this calibration, the raw funnel math produces wildly-uneven channel
+# ROAS (events at 125x, display at 0.07x) because the underlying CTR / CVR /
+# AOV constants were set for visual differentiation rather than balance.
+#
+# The calibration works by applying a per-channel revenue multiplier after
+# the funnel runs. Funnel numbers (clicks, leads, conversions) remain
+# realistic and interconnected -- only the final revenue gets scaled so the
+# portfolio looks like a plausible real-world channel mix.
+#
+# Target ROAS is what a CMO would consider healthy for each channel:
+#   - paid_search: 4-6x, steady workhorse
+#   - organic_search: very high ROAS because spend is mostly SEO labor
+#   - email: 10-15x, low cost relative to revenue (mature list)
+#   - events: 2-4x, big absolute spend with long sales cycle
+#   - display: 1.5-3x, awareness channel
+#   - direct_mail: 2-4x, declining but still present in B2B
+TARGET_CHANNEL_MIX = {
+    "paid_search":    {"target_roas": 5.0},
+    "organic_search": {"target_roas": 40.0},
+    "social_paid":    {"target_roas": 3.5},
+    "display":        {"target_roas": 2.2},
+    "email":          {"target_roas": 13.0},
+    "video_youtube":  {"target_roas": 2.5},
+    "events":         {"target_roas": 3.0},
+    "direct_mail":    {"target_roas": 3.0},
+}
+
+
+# Measured at generation time from a single representative run with
+# np.random.seed(42). Dividing target_roas by baseline_roas gives the
+# scalar that brings each channel's revenue from raw-funnel output to
+# target. Updated by running _measure_baseline_roas() below.
+#
+# These are the "as-generated" ROAS values from the raw funnel before
+# any calibration. The calibration multiplier is target / baseline.
+BASELINE_UNCALIBRATED_ROAS = {
+    "paid_search":    6.4,
+    "organic_search": 3.9,
+    "social_paid":    0.6,
+    "display":        0.07,
+    "email":          33.5,
+    "video_youtube":  0.11,
+    "events":         125.0,
+    "direct_mail":    2.1,
+}
+
+
+def _channel_revenue_calibration(channel: str) -> float:
+    """Revenue calibration factor for a channel.
+
+    Scales raw funnel revenue to hit TARGET_CHANNEL_MIX[channel]['target_roas'].
+    Applied multiplicatively at the end of the funnel after all other noise.
+    Returns 1.0 for channels not in the calibration table (no rescaling).
+    """
+    if channel not in TARGET_CHANNEL_MIX or channel not in BASELINE_UNCALIBRATED_ROAS:
+        return 1.0
+    target = TARGET_CHANNEL_MIX[channel]["target_roas"]
+    baseline = BASELINE_UNCALIBRATED_ROAS[channel]
+    if baseline <= 0:
+        return 1.0  # avoid div-zero; channel would need different approach
+    return target / baseline
+
 CAMPAIGNS_PER_CHANNEL = {
     "paid_search": ["PS_Brand", "PS_Generic", "PS_Competitor", "PS_Product"],
     "organic_search": ["SEO_Blog", "SEO_Product_Pages"],
@@ -44,8 +108,160 @@ PRODUCTS = ["Product_A", "Product_B", "Product_C"]
 
 MONTHS = pd.date_range("2022-01-01", periods=48, freq="MS")  # 4 years for model training
 
-# Seasonality multipliers (index 0 = Jan)
+# Shared macro-seasonality — a mild signal that affects every channel (consumer
+# attention rises in Q4, dips in summer). Kept modest (±20%) so it doesn't
+# dominate channel-specific patterns.
 SEASONALITY = [0.85, 0.80, 0.95, 1.05, 1.10, 1.00, 0.90, 0.88, 1.05, 1.15, 1.25, 1.30]
+
+
+# Channel-specific temporal signatures. Each channel's monthly spend is shaped
+# by ITS OWN pattern, not the shared SEASONALITY. This is what gives MMM
+# enough independent variation across channels to actually identify separate
+# betas — without this, channel spend columns correlate at ~0.99 and no
+# statistical method (OLS, MLE, Bayesian) can tell them apart.
+#
+# Each entry describes one channel's behavior over a 12-month cycle:
+#   phase_shift:   offset (in months) of that channel's peak
+#   amplitude:     how strong the seasonal swing is (0 = flat, 0.4 = ±40%)
+#   base_trend_yr: annual linear growth factor applied to all months
+#                  (positive = channel growing over 4 years, negative = declining)
+#   noise_pct:     intra-month noise -- offline channels are noisier
+#   flight_months: specific months of the year (0-11) where this channel is
+#                  mostly OFF. Empty list = always-on.
+#   spike_months:  (year_month_of_year) tuples where a specific launch event
+#                  occurred. Spend is 2-3x normal.
+#
+# These are modeled on roughly-plausible B2B/mid-market spend patterns.
+CHANNEL_PATTERNS: Dict[str, dict] = {
+    "paid_search": {
+        # Always-on but with budget reallocations: mild seasonality plus
+        # two spike months per year (competitive events, launches). Without
+        # some variation, MMM absorbs paid_search into baseline.
+        "phase_shift": 10,  # peak in Nov
+        "amplitude": 0.25,
+        "base_trend_yr": 0.08,
+        "noise_pct": 0.10,
+        "flight_months": [],
+        "spike_months": [
+            (2022, 5), (2022, 11),
+            (2023, 5), (2023, 11),
+            (2024, 5), (2024, 11),
+            (2025, 5), (2025, 11),
+        ],
+    },
+    "organic_search": {
+        # Near-flat spend (SEO is mostly labor), but grows ~15%/yr as content compounds.
+        "phase_shift": 0,
+        "amplitude": 0.05,
+        "base_trend_yr": 0.15,
+        "noise_pct": 0.05,
+        "flight_months": [],
+        "spike_months": [],
+    },
+    "social_paid": {
+        # Summer campaign focus (CMO-driven), less in Q4 when display takes over.
+        "phase_shift": 6,  # peak in Jul
+        "amplitude": 0.35,
+        "base_trend_yr": 0.12,
+        "noise_pct": 0.12,
+        "flight_months": [],
+        "spike_months": [(2023, 9), (2024, 3)],  # product-launch pushes
+    },
+    "display": {
+        # Campaign-flighted: heavy in holiday run-up, minimal in Feb/Mar/Jul/Aug.
+        "phase_shift": 10,  # peak in Nov
+        "amplitude": 0.45,
+        "base_trend_yr": -0.05,  # declining as programmatic gets expensive
+        "noise_pct": 0.10,
+        "flight_months": [1, 2, 6, 7],  # off in Feb, Mar, Jul, Aug
+        "spike_months": [],
+    },
+    "email": {
+        # Strong Q4 push (Black Friday, EOY) plus mid-year promo flights.
+        "phase_shift": 11,  # peak in Dec
+        "amplitude": 0.55,
+        "base_trend_yr": 0.05,
+        "noise_pct": 0.08,
+        "flight_months": [],
+        "spike_months": [
+            (2022, 11), (2023, 6), (2023, 11), (2024, 6), (2024, 11), (2025, 6),
+        ],
+    },
+    "video_youtube": {
+        # Two big quarterly campaign pushes, quiet in between.
+        "phase_shift": 3,  # peak in Apr
+        "amplitude": 0.30,
+        "base_trend_yr": 0.10,
+        "noise_pct": 0.12,
+        "flight_months": [0, 1, 7, 8],  # quiet Jan-Feb, Aug-Sep
+        "spike_months": [(2022, 6), (2023, 6), (2024, 6), (2025, 6)],  # annual summer push
+    },
+    "events": {
+        # Pure spike behavior: trade shows happen in specific months. Mostly off.
+        "phase_shift": 4,  # nominal peak in May
+        "amplitude": 0.20,
+        "base_trend_yr": 0.05,
+        "noise_pct": 0.15,
+        "flight_months": [0, 1, 6, 7, 11],  # off outside event season
+        "spike_months": [
+            (2022, 3), (2022, 9),
+            (2023, 3), (2023, 9), (2023, 10),
+            (2024, 3), (2024, 9),
+            (2025, 3), (2025, 9), (2025, 10),
+        ],
+    },
+    "direct_mail": {
+        # Holiday-heavy catalog drops, flat through most of the year.
+        "phase_shift": 10,  # peak in Nov
+        "amplitude": 0.50,
+        "base_trend_yr": -0.08,  # declining channel
+        "noise_pct": 0.12,
+        "flight_months": [1, 2, 3, 5, 6, 7],  # only active Aug-Dec and Jan/Apr
+        "spike_months": [],
+    },
+}
+
+
+def _channel_spend_multiplier(channel: str, month_idx: int, month) -> float:
+    """Compute a channel-specific spend multiplier for a given month.
+
+    Returns a value typically in [0.1, 2.5] that should multiply the channel's
+    base spend. Combines channel-specific seasonality, growth trend, campaign
+    flighting, and launch-event spikes. Intentionally NOT a function of the
+    shared SEASONALITY array -- that's the whole point.
+    """
+    pattern = CHANNEL_PATTERNS.get(channel)
+    if pattern is None:
+        # Fallback: use shared seasonality if channel has no custom pattern.
+        return SEASONALITY[month_idx % 12]
+
+    month_of_year = month_idx % 12
+    years_elapsed = month_idx / 12.0
+
+    # Channel-specific sinusoidal seasonality, peaked at phase_shift month.
+    # cos(0) = 1 at peak, so (month - phase) should be 0 at peak.
+    phase_rad = 2 * np.pi * ((month_of_year - pattern["phase_shift"]) % 12) / 12
+    seasonal = 1.0 + pattern["amplitude"] * np.cos(phase_rad)
+
+    # Growth trend over the 4-year span.
+    trend = 1.0 + pattern["base_trend_yr"] * years_elapsed
+
+    # Flight: is this a month the channel is mostly off? If so, reduce to 10-20%.
+    if month_of_year in pattern["flight_months"]:
+        flight_mult = np.random.uniform(0.1, 0.25)
+    else:
+        flight_mult = 1.0
+
+    # Event spikes. Check (year, month_of_year_1indexed) tuples.
+    year_actual = month.year
+    month_actual = month.month
+    spike_mult = 1.0
+    for yr, mo in pattern["spike_months"]:
+        if year_actual == yr and month_actual == mo:
+            spike_mult = np.random.uniform(2.0, 3.0)
+            break
+
+    return seasonal * trend * flight_mult * spike_mult
 
 
 def _diminishing_returns(spend: float, saturation: float, alpha: float = 0.45) -> float:
@@ -64,29 +280,41 @@ def _add_noise(value: float, noise_pct: float = 0.1) -> float:
 def generate_campaign_performance() -> pd.DataFrame:
     """Generate monthly campaign-level performance data."""
     rows = []
-    
+
     for month_idx, month in enumerate(MONTHS):
-        season = SEASONALITY[month_idx % 12]  # Repeat yearly pattern
-        
+        # Shared macro-seasonality applied MILDLY — most of the channel
+        # variation comes from CHANNEL_PATTERNS, not this. Softened to
+        # [0.92, 1.08] so it's a faint background signal, not the driver.
+        macro_season = 1.0 + 0.08 * (SEASONALITY[month_idx % 12] - 1.0) / 0.3
+
         for channel_name, channel_props in CHANNELS.items():
             campaigns = CAMPAIGNS_PER_CHANNEL[channel_name]
-            
+
+            # Channel-specific temporal signature -- the key to identifiability.
+            channel_mult = _channel_spend_multiplier(channel_name, month_idx, month)
+
             for campaign in campaigns:
                 for region in REGIONS:
-                    # Base monthly spend varies by channel and campaign
                     base_spend = _get_base_spend(channel_name, campaign)
-                    # Apply seasonality and regional variation
                     regional_mult = {"North": 1.1, "South": 0.9, "East": 1.0, "West": 1.05}[region]
-                    monthly_spend = _add_noise(base_spend * season * regional_mult, 0.12)
-                    
+
+                    # Combine channel-specific pattern (primary) + mild macro (secondary).
+                    monthly_spend = _add_noise(
+                        base_spend * channel_mult * macro_season * regional_mult,
+                        CHANNEL_PATTERNS.get(channel_name, {}).get("noise_pct", 0.12),
+                    )
+
                     if channel_name == "organic_search":
-                        monthly_spend = _add_noise(2000 * regional_mult, 0.05)  # minimal SEO cost
-                    
+                        # SEO is a near-fixed labor cost, independent of the
+                        # above pattern except for the mild growth trend.
+                        sk_trend = 1.0 + 0.15 * (month_idx / 12.0)  # ~15%/yr growth
+                        monthly_spend = _add_noise(2000 * regional_mult * sk_trend, 0.05)
+
                     # Apply diminishing returns to get effective output
                     effective_output = _diminishing_returns(
                         monthly_spend, channel_props["saturation_point"]
                     )
-                    
+
                     # Calculate funnel metrics — diminishing returns flow through
                     impressions = _add_noise(effective_output * _get_impression_mult(channel_name), 0.15)
                     clicks = _add_noise(impressions * _get_ctr(channel_name, campaign), 0.12)
@@ -96,10 +324,19 @@ def generate_campaign_performance() -> pd.DataFrame:
                     # Conversions: DO NOT re-apply season — it's already in spend→effective_output
                     # This ensures high spend months show lower ROI (diminishing returns)
                     conversions = _add_noise(sqls * channel_props["base_cvr"] * 10, 0.18)
-                    
+
                     # Revenue per conversion varies by product mix
                     avg_order_value = _add_noise(_get_aov(channel_name), 0.1)
                     revenue = conversions * avg_order_value
+
+                    # Calibrate to target channel ROAS. Without this, the raw
+                    # funnel produces wildly-uneven ROAS across channels
+                    # (events at 125x, display at 0.07x) because the original
+                    # CTR/CVR/AOV constants were set for visual differentiation
+                    # rather than portfolio balance. The calibration preserves
+                    # all funnel counts (clicks, leads, conversions) — only
+                    # the final revenue is scaled.
+                    revenue = revenue * _channel_revenue_calibration(channel_name)
                     
                     # CX signals
                     bounce_rate = _get_bounce_rate(channel_name, campaign)

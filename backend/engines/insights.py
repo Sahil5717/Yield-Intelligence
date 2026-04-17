@@ -42,72 +42,133 @@ def generate_insights(
     overall_cac = total_spend / max(total_conv, 1)
 
     # ═══ EXECUTIVE HEADLINES ═══
-    # 1. Portfolio health
+    # 1. Portfolio health (always fires)
     if overall_roi > 3:
         insights["executive_headlines"].append({
             "type": "positive", "priority": 1,
             "headline": f"Strong portfolio: {overall_roi:.1f}x ROI across all channels",
-            "detail": f"Every $1 invested returns ${overall_roi+1:.2f}. Portfolio ROAS is {overall_roas:.1f}x. This is above typical B2B benchmarks (2-5x).",
+            "detail": f"Every $1 invested returns ${overall_roi+1:.2f}. Portfolio ROAS is {overall_roas:.1f}x, above typical B2B benchmarks of 2-5x.",
             "metric": "roi", "value": round(overall_roi, 2),
         })
     elif overall_roi > 1:
         insights["executive_headlines"].append({
             "type": "neutral", "priority": 1,
             "headline": f"Moderate portfolio ROI at {overall_roi:.1f}x",
-            "detail": f"Returns are positive but there's room for improvement through reallocation. CAC is ${overall_cac:,.0f}.",
+            "detail": f"Returns are positive but there's meaningful room for improvement through reallocation. Portfolio CAC is ${overall_cac:,.0f}.",
             "metric": "roi", "value": round(overall_roi, 2),
         })
     else:
         insights["executive_headlines"].append({
             "type": "negative", "priority": 1,
             "headline": f"Portfolio ROI is only {overall_roi:.1f}x — needs urgent attention",
-            "detail": f"Marketing spend is not generating sufficient returns. Every $1 returns only ${overall_roi+1:.2f}. Reallocation or cuts needed.",
+            "detail": f"Marketing spend is not generating sufficient returns. Every $1 returns only ${overall_roi+1:.2f}. Reallocation or spend cuts needed.",
             "metric": "roi", "value": round(overall_roi, 2),
         })
 
-    # 2. Channel concentration risk
+    # 2. Channel concentration risk (widened: 30% threshold, was 40%)
     ch_rev = df.groupby("channel")["revenue"].sum().sort_values(ascending=False)
     if len(ch_rev) > 0:
         top_ch = ch_rev.index[0]
         top_pct = float(ch_rev.iloc[0] / max(total_rev, 1) * 100)
-        if top_pct > 40:
+        top2_pct = float(ch_rev.iloc[:2].sum() / max(total_rev, 1) * 100) if len(ch_rev) > 1 else top_pct
+        if top_pct > 30:
             insights["executive_headlines"].append({
                 "type": "warning", "priority": 2,
                 "headline": f"Concentration risk: {top_ch.replace('_',' ').title()} drives {top_pct:.0f}% of revenue",
-                "detail": f"Over-reliance on a single channel creates vulnerability. If {top_ch.replace('_',' ')} performance drops, there's no backup at scale.",
+                "detail": f"Over-reliance on a single channel creates vulnerability. If {top_ch.replace('_',' ')} performance drops for any reason, there's no backup at scale.",
                 "metric": "concentration", "value": round(top_pct, 1),
             })
+        elif top2_pct > 55:
+            insights["executive_headlines"].append({
+                "type": "warning", "priority": 2,
+                "headline": f"Top 2 channels drive {top2_pct:.0f}% of revenue",
+                "detail": f"{ch_rev.index[0].replace('_',' ').title()} and {ch_rev.index[1].replace('_',' ').title()} together carry majority of revenue. Consider diversification for resilience.",
+                "metric": "concentration_top2", "value": round(top2_pct, 1),
+            })
 
-    # 3. Online vs Offline efficiency gap
+    # 3. Online vs Offline efficiency gap (widened: 1x threshold, was 2x)
     online = df[df.get("channel_type", df.get("ct", pd.Series(dtype=str))) == "online"]
     offline = df[df.get("channel_type", df.get("ct", pd.Series(dtype=str))) == "offline"]
     if len(online) > 0 and len(offline) > 0:
         on_roi = (online["revenue"].sum() - online["spend"].sum()) / max(online["spend"].sum(), 1)
         off_roi = (offline["revenue"].sum() - offline["spend"].sum()) / max(offline["spend"].sum(), 1)
         gap = abs(on_roi - off_roi)
-        if gap > 2:
+        if gap > 1:
             better = "Online" if on_roi > off_roi else "Offline"
             worse = "Offline" if on_roi > off_roi else "Online"
             insights["executive_headlines"].append({
                 "type": "insight", "priority": 3,
-                "headline": f"{better} outperforms {worse} by {gap:.1f}x ROI",
-                "detail": f"{better} ROI is {max(on_roi,off_roi):.1f}x vs {worse} at {min(on_roi,off_roi):.1f}x. Consider shifting budget toward {better} channels unless {worse} has strategic value.",
+                "headline": f"{better} channels outperform {worse} by {gap:.1f}x ROI",
+                "detail": f"{better} ROI is {max(on_roi,off_roi):.1f}x vs {worse} at {min(on_roi,off_roi):.1f}x. Consider shifting budget toward {better} unless {worse} carries strategic value (brand, air cover, specific audiences).",
                 "metric": "channel_gap", "value": round(gap, 1),
             })
 
-    # 4. Trend momentum
+    # 4. Trend momentum (widened: 5% threshold, was 10%)
     monthly_rev = df.groupby(time_col)["revenue"].sum().sort_index()
     if len(monthly_rev) >= 6:
         h1 = monthly_rev.iloc[:len(monthly_rev)//2].mean()
         h2 = monthly_rev.iloc[len(monthly_rev)//2:].mean()
         momentum = (h2 - h1) / max(h1, 1) * 100
-        if abs(momentum) > 10:
+        if abs(momentum) > 5:
             direction = "accelerating" if momentum > 0 else "decelerating"
             insights["executive_headlines"].append({
                 "type": "positive" if momentum > 0 else "warning", "priority": 3,
-                "headline": f"Revenue is {direction}: {momentum:+.1f}% H2 vs H1",
-                "detail": f"Second half average ${h2:,.0f}/month vs first half ${h1:,.0f}/month. {'Maintain strategy.' if momentum > 0 else 'Investigate root cause — is it seasonal or structural?'}",
+                "headline": f"Revenue momentum is {direction}: {momentum:+.1f}% H2 vs H1",
+                "detail": f"Second-half monthly average ${h2:,.0f} vs first-half ${h1:,.0f}. {'Maintain current strategy and monitor for sustainability.' if momentum > 0 else 'Investigate root cause — distinguish seasonal from structural drivers.'}",
                 "metric": "momentum", "value": round(momentum, 1),
+            })
+
+    # 5. Saturation / headroom profile (NEW — fires when response curves
+    #    show either widespread saturation or widespread untapped headroom)
+    if response_curves:
+        curves_list = [(ch, v) for ch, v in response_curves.items() if "error" not in v]
+        if curves_list:
+            # Share of spend on channels with <20% headroom (saturated)
+            sat_spend = sum(v.get("current_avg_spend", 0) * 12 for _, v in curves_list
+                            if v.get("headroom_pct", 0) < 20)
+            total_ch_spend = sum(v.get("current_avg_spend", 0) * 12 for _, v in curves_list)
+            sat_share = sat_spend / max(total_ch_spend, 1) * 100
+            # Share of spend on channels with >50% headroom (growth room)
+            growth_spend = sum(v.get("current_avg_spend", 0) * 12 for _, v in curves_list
+                               if v.get("headroom_pct", 0) > 50 and not v.get("near_linear_fit", False))
+            growth_share = growth_spend / max(total_ch_spend, 1) * 100
+
+            if sat_share > 30:
+                insights["executive_headlines"].append({
+                    "type": "warning", "priority": 2,
+                    "headline": f"{sat_share:.0f}% of spend sits on saturating channels",
+                    "detail": f"Channels with less than 20% response-curve headroom absorb ${sat_spend/1e6:.1f}M of current annual spend. Further investment in these will likely show diminishing returns.",
+                    "metric": "saturation_share", "value": round(sat_share, 1),
+                })
+            if growth_share > 20:
+                insights["executive_headlines"].append({
+                    "type": "positive", "priority": 2,
+                    "headline": f"{growth_share:.0f}% of spend is on channels with substantial headroom",
+                    "detail": f"Channels showing >50% response-curve headroom with reliable fits carry ${growth_spend/1e6:.1f}M of current annual spend. These are your near-term growth levers.",
+                    "metric": "growth_share", "value": round(growth_share, 1),
+                })
+
+    # 6. CAC spread (NEW — fires when per-channel CAC varies dramatically,
+    #    signaling reallocation opportunity)
+    ch_data_temp = df.groupby("channel").agg(
+        s=("spend","sum"),
+        c=(conv_col, "sum") if conv_col in df.columns else ("revenue", "count"),
+    ).reset_index()
+    ch_data_temp["cac"] = ch_data_temp["s"] / ch_data_temp["c"].clip(lower=1)
+    if len(ch_data_temp) >= 3:
+        cac_ratio = float(ch_data_temp["cac"].max() / max(ch_data_temp["cac"].min(), 1))
+        if cac_ratio > 5:
+            best_ch = ch_data_temp.sort_values("cac").iloc[0]["channel"]
+            worst_ch = ch_data_temp.sort_values("cac").iloc[-1]["channel"]
+            insights["executive_headlines"].append({
+                "type": "insight", "priority": 3,
+                "headline": f"Per-channel CAC spans {cac_ratio:.0f}x between best and worst channel",
+                "detail": (
+                    f"{best_ch.replace('_',' ').title()} converts at ${ch_data_temp['cac'].min():,.0f} CAC; "
+                    f"{worst_ch.replace('_',' ').title()} is ${ch_data_temp['cac'].max():,.0f}. "
+                    f"Note: some of this is channel function (reach vs. response), not pure inefficiency."
+                ),
+                "metric": "cac_spread", "value": round(cac_ratio, 1),
             })
 
     # ═══ CHANNEL STORIES ═══

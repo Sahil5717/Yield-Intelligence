@@ -80,15 +80,51 @@ def fit_response_curves(campaign_df, model_type="power_law"):
                 y_pred = power_law(x, a, b)
                 perr = np.sqrt(np.diag(pcov))  # std errors of params
                 avg_spend = float(x.mean())
-                sat_spend = float(np.power(a*b, 1/(1-b))) if b < 1 else avg_spend*3
+
+                # Near-linear detection. When b approaches 1.0, the power-law
+                # curve doesn't meaningfully saturate within any spend range
+                # you could actually commit to -- the analytical saturation
+                # point (a*b)^(1/(1-b)) goes to infinity as b → 1, which
+                # produced 10^150-scale sat_spend values on organic search
+                # (b=0.99) and drove downstream recommendations to fabricate
+                # "40% headroom" where none existed.
+                #
+                # We flag the fit as near-linear (unreliable for headroom/
+                # saturation claims), cap the reported saturation at 5x
+                # observed max spend, and cap trusted_headroom_pct at 40%
+                # to prevent SCALE recs from sizing impact off a phantom
+                # saturation gap.
+                near_linear = bool(b > 0.90)
+                observed_max = float(np.max(x))
+
+                if near_linear:
+                    # No trustable analytical saturation. Use a conservative
+                    # ceiling of 3x current spend (same cap as the optimizer).
+                    sat_spend = observed_max * 3.0
+                    # Trusted headroom is bounded regardless of curve shape.
+                    trusted_headroom = 40.0
+                else:
+                    sat_spend_analytical = float(np.power(a*b, 1/(1-b)))
+                    # Clamp the reported saturation at 5x observed max; beyond
+                    # that we're extrapolating past what the data supports.
+                    sat_spend = min(sat_spend_analytical, observed_max * 5.0)
+                    trusted_headroom = max(0, (sat_spend - avg_spend) / sat_spend * 100)
+
+                # Marginal ROI at current spend -- this is in the trusted
+                # range (avg_spend is inside observed data), so no cap needed.
                 mROI = marginal_power_law(avg_spend, a, b)
-                headroom = max(0, (sat_spend - avg_spend) / sat_spend * 100)
+                # Raw headroom (using analytical sat) kept for diagnostic
+                # comparison; NOT used by downstream engines.
+                raw_headroom = max(0, (sat_spend - avg_spend) / sat_spend * 100) if sat_spend > 0 else 0
+                headroom = trusted_headroom
+
                 # Generate curve points for visualization
                 x_max = max(x) * 1.8
                 curve_pts = [{"spend": round(s), "revenue": round(float(power_law(s, a, b)))}
                              for s in np.linspace(0, x_max, 50)]
                 params = {"a": round(float(a), 4), "b": round(float(b), 4),
-                          "a_std": round(float(perr[0]), 4), "b_std": round(float(perr[1]), 4)}
+                          "a_std": round(float(perr[0]), 4), "b_std": round(float(perr[1]), 4),
+                          "near_linear": near_linear}
             else:  # hill
                 p0 = [max(y)*1.5, 0.8, np.median(x)]
                 popt, pcov = curve_fit(hill_curve, x, y, p0=p0,
@@ -142,6 +178,7 @@ def fit_response_curves(campaign_df, model_type="power_law"):
                 "saturation_spend": round(sat_spend, 0),
                 "marginal_roi": round(float(mROI), 4),
                 "headroom_pct": round(headroom, 1),
+                "near_linear_fit": bool(params.get("near_linear", False)),
                 "diagnostics": {
                     "r_squared": round(float(r2), 4),
                     "rmse": round(rmse, 0),

@@ -13,9 +13,32 @@ from typing import Dict, List, Optional
 import logging
 logger = logging.getLogger(__name__)
 
-def _predict_revenue(spend_annual, curve):
-    """Predict annual revenue from annual spend using fitted response curve."""
-    monthly = spend_annual / 12
+# How far outside the observed spend range we'll trust the fitted response curve.
+# If current avg spend is $100K/month, we evaluate the curve up to $300K/month
+# (3x) and beyond that we clamp to the value at the cap. This prevents the
+# classic MMM bug where a near-linear fit (b -> 1.0) extrapolated to 10x the
+# observed range produces absurd revenue predictions -- e.g. organic search
+# with b=0.99 has an analytical saturation point at ~10^158 and the optimizer
+# rationally pours all budget into it. Real MMM engagements always bound the
+# trusted extrapolation range.
+DEFAULT_EXTRAPOLATION_CAP = 3.0
+
+
+def _predict_revenue(spend_annual, curve, extrapolation_cap=DEFAULT_EXTRAPOLATION_CAP):
+    """Predict annual revenue from annual spend using fitted response curve.
+
+    Spend is clamped at `extrapolation_cap * current_avg_spend_annual`. Beyond
+    that, the curve returns the revenue value at the cap -- i.e. we assume
+    zero marginal return past the trusted range. This is conservative and
+    defensible; the alternative (blind extrapolation) drives real MMM
+    disasters.
+    """
+    current_monthly = curve.get("current_avg_spend", 0)
+    current_annual = current_monthly * 12
+    cap_annual = max(current_annual * extrapolation_cap, 1000.0)  # at least $1k/yr
+    effective_spend = min(spend_annual, cap_annual)
+
+    monthly = effective_spend / 12
     if curve.get("model") == "hill":
         a, b, K = curve["params"]["a"], curve["params"]["b"], curve["params"]["K"]
         xb = np.power(max(monthly, 1e-6), b)
@@ -24,8 +47,21 @@ def _predict_revenue(spend_annual, curve):
         a, b = curve["params"]["a"], curve["params"]["b"]
         return float(a * np.power(max(monthly, 1e-6), b)) * 12
 
-def _marginal_revenue(spend_annual, curve):
-    """Marginal revenue (derivative) at given spend level."""
+
+def _marginal_revenue(spend_annual, curve, extrapolation_cap=DEFAULT_EXTRAPOLATION_CAP):
+    """Marginal revenue (derivative) at given spend level.
+
+    Outside the trusted extrapolation range, marginal revenue is 0 -- we
+    refuse to say anything about return on additional spend beyond the
+    cap. This is what drives the optimizer to back off rather than
+    recommending infinite spend on near-linear channels.
+    """
+    current_monthly = curve.get("current_avg_spend", 0)
+    current_annual = current_monthly * 12
+    cap_annual = max(current_annual * extrapolation_cap, 1000.0)
+    if spend_annual > cap_annual:
+        return 0.0
+
     monthly = spend_annual / 12
     if curve.get("model") == "hill":
         a, b, K = curve["params"]["a"], curve["params"]["b"], curve["params"]["K"]
@@ -45,6 +81,8 @@ def optimize_budget(
     locked_channels: Optional[Dict] = None,
     current_allocation: Optional[Dict] = None,
     n_restarts: int = 5,
+    max_channel_change_pct: float = 0.75,
+    extrapolation_cap: float = DEFAULT_EXTRAPOLATION_CAP,
 ) -> Dict:
     """
     Constrained budget optimization using scipy SLSQP solver with multi-start.
@@ -55,6 +93,15 @@ def optimize_budget(
         objective: maximize_revenue | maximize_roi | minimize_cac | balanced
         locked_channels: {channel: fixed_spend}
         n_restarts: number of random starting points to escape local optima
+        max_channel_change_pct: cap on how much a single channel can move from
+            its current allocation in one optimization step. 0.75 = channel
+            may move between 25% and 175% of current. Real CMOs rarely swing
+            a channel budget past ±50% in a quarter; this protects against
+            the optimizer exploiting an overfit response curve to recommend
+            a 10x reallocation.
+        extrapolation_cap: how far outside observed spend range to trust the
+            fitted curve. 3.0 means the curve is evaluated up to 3x
+            current average spend, then clamped.
     """
     locked = locked_channels or {}
     channels = [ch for ch in response_curves if ch not in locked and "error" not in response_curves[ch]]
@@ -70,9 +117,13 @@ def optimize_budget(
     if objective_weights is None:
         objective_weights = {"revenue": 0.4, "roi": 0.3, "leakage": 0.15, "cost": 0.15}
 
-    # Objective function (minimize negative objective)
+    # Objective function (minimize negative objective).
+    # Pass extrapolation_cap through to _predict_revenue / _marginal_revenue.
     def neg_objective(x):
-        total_rev = sum(_predict_revenue(x[i], response_curves[channels[i]]) for i in range(n))
+        total_rev = sum(
+            _predict_revenue(x[i], response_curves[channels[i]], extrapolation_cap)
+            for i in range(n)
+        )
         total_sp = sum(x)
         if objective == "maximize_revenue":
             return -total_rev
@@ -86,20 +137,126 @@ def optimize_budget(
             return -(objective_weights.get("revenue",0.4) * total_rev / 1e6
                    + objective_weights.get("roi",0.3) * roi * 10)
 
-    # Constraints
-    bounds = [(avail * min_spend_pct, avail * max_spend_pct) for _ in range(n)]
+    # If the requested budget is much larger than current spend, the
+    # "don't swing any channel more than ±75%" rule is the wrong one --
+    # the user is asking where to deploy net-new budget, not how to
+    # reallocate existing budget. Scale the per-channel swing cap up
+    # proportionally to the budget-to-current-spend ratio, clipped so
+    # the cap never drops below 0.5 (allowing at least 50% swing).
+    current_total = sum(current_allocation.values())
+    budget_expansion = avail / max(current_total, 1.0)
+    if budget_expansion > 1.2:
+        effective_swing_cap = max_channel_change_pct * budget_expansion
+        if effective_swing_cap != max_channel_change_pct:
+            logger.info(
+                f"Budget is {budget_expansion:.1f}x current spend; relaxing "
+                f"swing cap from {max_channel_change_pct:.2f} to {effective_swing_cap:.2f}"
+            )
+    else:
+        effective_swing_cap = max_channel_change_pct
+
+    # Per-channel bounds: combine global floor/ceiling with per-channel
+    # swing limit AND extrapolation cap.
+    #
+    # The extrapolation cap matters as an upper bound because _predict_revenue
+    # returns a constant value past the cap (marginal revenue = 0). If we let
+    # SLSQP explore into that region, the objective function has a flat gradient
+    # there, which SLSQP interprets as a convergence failure ("Positive
+    # directional derivative for linesearch" — there's no descent direction).
+    # Clipping the upper bound to the extrapolation cap keeps SLSQP in the
+    # region where the objective function is actually differentiable and
+    # informative.
+    #
+    # Subtle point on the floor: min_spend_pct is a FLOOR below which we
+    # don't want the optimizer to zero out a channel -- but if a channel's
+    # current spend is already smaller than that floor, we shouldn't force
+    # it up just because the total budget is large. The floor is "don't
+    # go below what you're currently spending, or min_spend_pct if you
+    # don't have a current number", NOT "spend at least min_spend_pct".
+    bounds = []
+    for i, ch in enumerate(channels):
+        cur = current_allocation.get(ch, avail / n)
+        global_min = avail * min_spend_pct
+        global_max = avail * max_spend_pct
+        # Floor: the smaller of global_min and a tight fraction of current.
+        floor = min(global_min, cur * (1.0 - effective_swing_cap))
+        floor = max(floor, 1000.0)  # hard minimum of $1k/yr
+        # Ceiling: min of three caps -- global, swing, extrapolation.
+        swing_max = cur * (1.0 + effective_swing_cap)
+        extrapolation_max = cur * extrapolation_cap  # same cap _predict_revenue uses
+        hi = min(global_max, swing_max, extrapolation_max)
+        if hi <= floor:
+            # Degenerate: fall back to a tight range around current.
+            floor = cur * 0.5
+            hi = cur * 2.0
+        bounds.append((floor, hi))
+
+    # Sanity check: can the channels absorb the total budget within bounds?
+    # If max absorbable capacity is less than the target budget, we tell the
+    # user explicitly instead of letting SLSQP fail cryptically. The
+    # optimizer will still run -- on min(budget, max_absorbable) -- so the
+    # caller gets a useful answer rather than an error.
+    max_absorbable = sum(b[1] for b in bounds)
+    min_required = sum(b[0] for b in bounds)
+    capacity_warning = None
+    if avail > max_absorbable:
+        capacity_warning = (
+            f"Requested budget (${avail:,.0f}) exceeds what the fitted curves "
+            f"can trustworthily absorb (${max_absorbable:,.0f} at 3x current spend "
+            f"per channel). Optimizing against capacity, not full budget. "
+            f"Beyond-capacity spend has no predicted return — a larger sample of "
+            f"historical data at higher spend levels is needed before extrapolating."
+        )
+        logger.warning(capacity_warning)
+        # Scale the equality constraint down to the absorbable amount so
+        # SLSQP has a feasible problem.
+        avail = max_absorbable * 0.98  # 2% slack for SLSQP numerical tolerance
+    elif avail < min_required:
+        capacity_warning = (
+            f"Requested budget (${avail:,.0f}) is below the sum of per-channel "
+            f"floors (${min_required:,.0f}). Raising budget to meet floors."
+        )
+        logger.warning(capacity_warning)
+        avail = min_required * 1.02
+
     constraints = [{"type": "eq", "fun": lambda x: sum(x) - avail}]
 
-    # Multi-start optimization
+    # Multi-start optimization.
+    # Starting points are clipped into per-channel bounds so SLSQP always
+    # starts feasibly. If the intersection of [lo, hi] bounds and the sum
+    # constraint leaves no feasible point (can happen when all global_mins
+    # sum to more than avail), we fall back to equal allocation.
+    lo_arr = np.array([b[0] for b in bounds])
+    hi_arr = np.array([b[1] for b in bounds])
+    min_sum = lo_arr.sum()
+    max_sum = hi_arr.sum()
+
     best_result = None; best_obj = float("inf")
     for restart in range(n_restarts):
         if restart == 0:
             x0 = np.array([current_allocation.get(ch, avail/n) for ch in channels])
-            x0 = x0 * (avail / x0.sum())  # normalize to available budget
+            if x0.sum() > 0:
+                x0 = x0 * (avail / x0.sum())
+            else:
+                x0 = np.full(n, avail / n)
         else:
             x0 = np.random.dirichlet(np.ones(n)) * avail
-        x0 = np.clip(x0, avail*min_spend_pct, avail*max_spend_pct)
-        x0 = x0 * (avail / x0.sum())
+
+        # Clip to per-channel bounds, then renormalize to hit sum=avail.
+        x0 = np.clip(x0, lo_arr, hi_arr)
+        if min_sum <= avail <= max_sum and x0.sum() > 0:
+            # Scale-and-project: scale to match avail, then re-clip, repeat
+            # a few times until feasible. This is a simple iterative fix
+            # that handles the common case without needing an LP.
+            for _ in range(5):
+                if abs(x0.sum() - avail) < 1e-6:
+                    break
+                x0 = x0 * (avail / x0.sum())
+                x0 = np.clip(x0, lo_arr, hi_arr)
+        else:
+            # Bounds incompatible with budget constraint; SLSQP will relax
+            # via the equality constraint, but warn the caller.
+            x0 = np.clip(x0 * (avail / max(x0.sum(), 1e-9)), lo_arr, hi_arr)
 
         try:
             res = minimize(neg_objective, x0, method="SLSQP", bounds=bounds,
@@ -170,9 +327,18 @@ def optimize_budget(
 
     # ═══ GUARDRAILS ═══
     warnings = []
-    
+    if capacity_warning:
+        warnings.append(capacity_warning)
+
     # Guard 1: If optimized is worse than current, fall back to current allocation
-    if total_opt_rev < total_cur_rev * 0.95:
+    # -- but only when current allocation actually fits within the target budget.
+    # If budget < current spend, we can't "stay with current" because that would
+    # violate the budget constraint. In that case the optimizer's answer
+    # (shrinking proportionally) stands even if revenue dropped, because
+    # dropping revenue is the correct answer when you cut budget.
+    total_current_spend = sum(c["current_spend"] for c in channel_results)
+    current_allocation_fits = total_current_spend <= total_budget * 1.01  # 1% tolerance
+    if total_opt_rev < total_cur_rev * 0.95 and current_allocation_fits:
         warnings.append("Optimizer found no improvement over current allocation. Returning current plan with analysis.")
         # Reset to current allocation
         for c in channel_results:
@@ -183,17 +349,40 @@ def optimize_budget(
                 c["revenue_delta"] = 0
                 c["optimized_roi"] = c["current_roi"]
         total_opt_rev = total_cur_rev
-    
-    # Guard 2: Cap extreme individual channel swings
+
+    # Guard 2: Cap extreme individual channel swings. With the new per-channel
+    # bounds and extrapolation cap, this should almost never fire — it's a
+    # belt-and-suspenders check against ever reporting a >+200% or <-80%
+    # swing to the user. When it does fire, we update BOTH the change_pct
+    # display AND the underlying optimized_spend (the previous code only
+    # updated the display, leaving an inconsistency between "spend went from
+    # $1M to $25M" and "change_pct = 200").
     for c in channel_results:
         if c.get("locked"): continue
+        cur = c["current_spend"]
         if c["change_pct"] > 200:
             warnings.append(f"{c['channel']}: capped from +{c['change_pct']:.0f}% to +200%")
             c["change_pct"] = 200
+            c["optimized_spend"] = round(cur * 3.0, 0)  # +200% = 3x current
+            c["optimized_revenue"] = round(
+                _predict_revenue(c["optimized_spend"], response_curves[c["channel"]], extrapolation_cap), 0
+            )
+            c["revenue_delta"] = round(c["optimized_revenue"] - c["current_revenue"], 0)
+            c["optimized_roi"] = round(
+                (c["optimized_revenue"] - c["optimized_spend"]) / max(c["optimized_spend"], 1), 3
+            )
         if c["change_pct"] < -80:
             warnings.append(f"{c['channel']}: capped from {c['change_pct']:.0f}% to -80%")
             c["change_pct"] = -80
-    
+            c["optimized_spend"] = round(cur * 0.2, 0)  # -80% = 0.2x current
+            c["optimized_revenue"] = round(
+                _predict_revenue(c["optimized_spend"], response_curves[c["channel"]], extrapolation_cap), 0
+            )
+            c["revenue_delta"] = round(c["optimized_revenue"] - c["current_revenue"], 0)
+            c["optimized_roi"] = round(
+                (c["optimized_revenue"] - c["optimized_spend"]) / max(c["optimized_spend"], 1), 3
+            )
+
     # Guard 3: Ensure all spends positive
     for c in channel_results:
         c["optimized_spend"] = max(0, c["optimized_spend"])

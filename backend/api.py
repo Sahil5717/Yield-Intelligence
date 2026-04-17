@@ -831,6 +831,260 @@ def get_business_case():
         ] if isinstance(recs, list) else [],
     })
 
+@app.get("/api/diagnosis")
+def get_diagnosis(view: str = "client", engagement_id: str = "default"):
+    """
+    Single-call payload for the Diagnosis screen.
+
+    Query params:
+      view: "client" (default) or "editor". Client view filters suppressed
+            findings and applies rewrites transparently. Editor view returns
+            all findings with suppression/rewrite metadata attached so the
+            editor UI can render controls.
+      engagement_id: overrides keyspace. Always "default" in v18a.
+
+    Returns a flat dict with:
+      - headline_paragraph: generated 2-3 sentence diagnosis
+      - kpis: portfolio_roas, value_at_risk, plan_confidence (with tones)
+      - findings: ranked list of 3-5 finding cards, each with stable `key`
+      - industry_context: benchmarks overlay (if external data uploaded)
+      - methodology: engines that contributed, for trust/reference
+      - data_coverage: scope metadata
+      - ey_overrides: editor overlay metadata — engagement_id, view, counts
+
+    Template-based narrative only (no LLM). Safe to cache between runs of
+    the same analysis; regenerate when any underlying engine re-runs.
+    """
+    if view not in ("client", "editor"):
+        raise HTTPException(400, f"Invalid view '{view}' — must be 'client' or 'editor'")
+    _ensure_analysis()
+    if _state["campaign_data"] is None:
+        raise HTTPException(400, "No data loaded — upload data or call /api/load-mock-data first")
+
+    from engines.narrative import generate_diagnosis
+    df = _state["reporting_data"] if _state["reporting_data"] is not None else _state["campaign_data"]
+
+    # Pull industry benchmarks from external-data upload if present
+    ext = _state.get("trends_result") or {}
+    bench = ext.get("benchmarks")
+
+    result = generate_diagnosis(
+        campaign_df=df,
+        response_curves=_state.get("curves") or {},
+        optimization=_state.get("optimization") or {},
+        pillars=_state.get("pillars") or {},
+        insights=_state.get("insights") or {},
+        recommendations=_state.get("diagnostics") or [],
+        mmm_result=_state.get("mmm_result"),
+        industry_benchmarks=bench,
+        engagement_id=engagement_id,
+        view=view,
+    )
+    return _j(result)
+
+
+# ═══ Plan screen (v18c) ═══
+
+@app.get("/api/plan")
+def get_plan(view: str = "client", engagement_id: str = "default",
+             total_budget: Optional[float] = None, objective: str = "balanced"):
+    """
+    Plan screen payload: the recommended budget reallocation.
+
+    Query params:
+      view: "client" (default) or "editor" — same semantics as /api/diagnosis
+      engagement_id: override keyspace (always "default" in single-tenant)
+      total_budget: if provided, re-optimizes at this budget before generating
+                    the plan. If omitted, uses current total spend + 5% for
+                    a natural "what should we do with roughly this budget"
+                    starting point.
+      objective: optimizer objective ("balanced", "max_revenue", "max_roi").
+
+    Returns:
+      headline_paragraph, kpis, moves (per-channel), tradeoffs,
+      methodology, summary, ey_overrides. Same shape family as
+      /api/diagnosis, different content semantics.
+
+    Caching: the optimizer has a stochastic multi-restart component,
+    which means re-running it on identical inputs can produce slightly
+    different allocations (the final picked solution is usually the
+    same, but near-tie moves can flip between increase/decrease/hold).
+    That flip breaks editor-overlay keys (move:events:decrease vs.
+    move:events:increase). To prevent orphaned overrides, we cache the
+    optimization result per (budget, objective) pair and only re-run
+    when these inputs actually change. The cache is cleared on
+    /api/run-analysis (which re-fits curves) so a genuine re-analysis
+    picks up new outputs.
+    """
+    if view not in ("client", "editor"):
+        raise HTTPException(400, f"Invalid view '{view}' — must be 'client' or 'editor'")
+    _ensure_analysis()
+    if _state["campaign_data"] is None:
+        raise HTTPException(400, "No data loaded — upload data or call /api/load-mock-data first")
+    if not _state.get("curves"):
+        raise HTTPException(400, "Response curves not fit yet — run /api/run-analysis first")
+
+    # Default budget: current total spend + 5% (same pattern as the
+    # integration test stability fix — gives the optimizer room to show
+    # upside without being asked to cut).
+    if total_budget is None:
+        curves = _state.get("curves", {})
+        current_total = sum(
+            v.get("current_avg_spend", 0) * 12
+            for v in curves.values() if "error" not in v
+        )
+        total_budget = current_total * 1.05
+    total_budget = float(total_budget)
+
+    # Check plan cache. Keyed by (budget, objective) — the two inputs
+    # that actually affect the optimizer's output. Invalidated when
+    # curves change (stored alongside the cached result as an identity
+    # check: if the curves dict object changed, the cache is stale).
+    cache_key = (round(total_budget, 0), objective)
+    curves_identity = id(_state.get("curves"))
+    plan_cache = _state.get("_plan_cache") or {}
+    cached = plan_cache.get(cache_key)
+    if cached and cached.get("curves_identity") == curves_identity:
+        optimization = cached["optimization"]
+    else:
+        from engines.optimizer import optimize_budget
+        optimization = optimize_budget(
+            _state["curves"],
+            total_budget,
+            objective=objective,
+        )
+        plan_cache[cache_key] = {
+            "optimization": optimization,
+            "curves_identity": curves_identity,
+        }
+        _state["_plan_cache"] = plan_cache
+
+    from engines.narrative_plan import generate_plan
+    plan = generate_plan(
+        optimization=optimization,
+        response_curves=_state.get("curves") or {},
+        engagement_id=engagement_id,
+        view=view,
+    )
+    return _j(plan)
+
+
+# ═══ EY Editor Overlay endpoints (v18a) ═══
+#
+# These endpoints mutate the editor overrides stored in persistence. They
+# are called only by the editor entry point (index-editor.html); the client
+# entry point never mutates anything, it only reads /api/diagnosis?view=client.
+#
+# In v18a there is no auth layer — any caller reaching these endpoints can
+# edit overrides. Auth will wrap these endpoints when it comes.
+
+from pydantic import BaseModel
+
+
+class CommentaryPayload(BaseModel):
+    finding_key: str
+    text: str
+    author: Optional[str] = None
+
+
+class SuppressionPayload(BaseModel):
+    finding_key: str
+    reason: str
+    author: Optional[str] = None
+
+
+class RewritePayload(BaseModel):
+    finding_key: str
+    field: str  # "headline" | "narrative" | "prescribed_action"
+    original: str
+    rewritten: str
+    author: Optional[str] = None
+
+
+def _engagement_id_param(engagement_id: Optional[str]) -> str:
+    """Resolve an engagement_id param, defaulting to 'default'."""
+    return (engagement_id or "default").strip() or "default"
+
+
+@app.post("/api/editor/commentary")
+def editor_set_commentary(body: CommentaryPayload, engagement_id: Optional[str] = None):
+    """Create or replace EY commentary for a finding."""
+    from persistence import set_commentary
+    eid = _engagement_id_param(engagement_id)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Commentary text cannot be empty. Use DELETE to remove.")
+    set_commentary(eid, body.finding_key, text, author=body.author)
+    return _j({"ok": True, "finding_key": body.finding_key})
+
+
+@app.delete("/api/editor/commentary/{finding_key:path}")
+def editor_delete_commentary(finding_key: str, engagement_id: Optional[str] = None,
+                              author: Optional[str] = None):
+    """Remove EY commentary for a finding."""
+    from persistence import delete_commentary
+    eid = _engagement_id_param(engagement_id)
+    deleted = delete_commentary(eid, finding_key, author=author)
+    return _j({"ok": True, "deleted": deleted, "finding_key": finding_key})
+
+
+@app.post("/api/editor/suppress")
+def editor_suppress_finding(body: SuppressionPayload, engagement_id: Optional[str] = None):
+    """Mark a finding as hidden from the client view. Reason is required."""
+    from persistence import suppress_finding
+    eid = _engagement_id_param(engagement_id)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required to suppress a finding (for audit).")
+    suppress_finding(eid, body.finding_key, reason, author=body.author)
+    return _j({"ok": True, "finding_key": body.finding_key})
+
+
+@app.delete("/api/editor/suppress/{finding_key:path}")
+def editor_unsuppress_finding(finding_key: str, engagement_id: Optional[str] = None,
+                               author: Optional[str] = None):
+    """Restore a previously suppressed finding to the client view."""
+    from persistence import unsuppress_finding
+    eid = _engagement_id_param(engagement_id)
+    deleted = unsuppress_finding(eid, finding_key, author=author)
+    return _j({"ok": True, "deleted": deleted, "finding_key": finding_key})
+
+
+@app.post("/api/editor/rewrite")
+def editor_set_rewrite(body: RewritePayload, engagement_id: Optional[str] = None):
+    """Save a text rewrite for a finding field (headline/narrative/prescribed_action).
+    Schema-ready in v18a; UI wired in v18b."""
+    from persistence import set_rewrite
+    eid = _engagement_id_param(engagement_id)
+    if body.field not in ("headline", "narrative", "prescribed_action"):
+        raise HTTPException(400, f"Invalid field '{body.field}'")
+    if not (body.rewritten or "").strip():
+        raise HTTPException(400, "Rewritten text cannot be empty. Use DELETE to revert.")
+    set_rewrite(eid, body.finding_key, body.field, body.original, body.rewritten,
+                author=body.author)
+    return _j({"ok": True, "finding_key": body.finding_key, "field": body.field})
+
+
+@app.delete("/api/editor/rewrite/{finding_key:path}/{field}")
+def editor_delete_rewrite(finding_key: str, field: str,
+                           engagement_id: Optional[str] = None,
+                           author: Optional[str] = None):
+    """Revert a rewrite back to the generated text."""
+    from persistence import delete_rewrite
+    eid = _engagement_id_param(engagement_id)
+    deleted = delete_rewrite(eid, finding_key, field, author=author)
+    return _j({"ok": True, "deleted": deleted, "finding_key": finding_key, "field": field})
+
+
+@app.get("/api/editor/audit-log")
+def editor_get_audit_log(engagement_id: Optional[str] = None, limit: int = 50):
+    """Return recent audit log entries for an engagement."""
+    from persistence import get_audit_log
+    eid = _engagement_id_param(engagement_id)
+    limit = max(1, min(500, limit))  # clamp
+    return _j({"engagement_id": eid, "entries": get_audit_log(eid, limit)})
+
+
 @app.get("/api/executive-summary")
 def get_executive_summary():
     """Generate a downloadable executive summary as text."""
@@ -917,10 +1171,17 @@ def run_adstock(adstock_type: str = "geometric"):
     return _j(compute_channel_adstock(_state["campaign_data"], adstock_type))
 
 @app.post("/api/mmm")
-def run_mmm_endpoint():
-    """Run Bayesian MMM (PyMC → OLS fallback)."""
+def run_mmm_endpoint(method: str = "auto", n_draws: int = 500):
+    """Run Marketing Mix Model.
+
+    method: "auto" (default, tries Bayesian → MLE → OLS), "bayesian", "mle", "ols".
+    n_draws: posterior draws per chain for Bayesian; ignored for MLE/OLS.
+
+    Note: Bayesian fit takes 60-180s on typical datasets. Use method="mle"
+    for fast iteration in dev and tests.
+    """
     if _state["campaign_data"] is None: raise HTTPException(400, "No data loaded")
-    return _j(run_mmm(_state["campaign_data"], method="auto"))  # ✅ updated call signature
+    return _j(run_mmm(_state["campaign_data"], method=method, n_draws=n_draws))
 
 @app.get("/api/markov-attribution")
 def get_markov_attribution():

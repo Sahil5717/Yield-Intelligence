@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { resolve } from 'path';
 
 export default defineConfig({
   plugins: [react()],
@@ -17,7 +18,15 @@ export default defineConfig({
     outDir: '../frontend-dist',
     emptyOutDir: true,
     rollupOptions: {
-      input: 'index-vite.html',
+      input: {
+        // The analyst workbench (existing)
+        analyst: resolve(__dirname, 'index-vite.html'),
+        // The MarketLens client app — client-facing Diagnosis surface
+        client: resolve(__dirname, 'index-client.html'),
+        // The EY editor — curation overlay on the same Diagnosis surface
+        editor: resolve(__dirname, 'index-editor.html'),
+      },
     },
   },
 });
+

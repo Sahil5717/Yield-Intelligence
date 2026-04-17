@@ -44,7 +44,33 @@ def generate_recommendations(df, response_curves, attribution, significance_leve
         if "error" in curve or "params" not in curve: continue
         headroom = curve.get("headroom_pct", 0)
         mROI = curve.get("marginal_roi", 0)
-        
+        near_linear = curve.get("near_linear_fit", False)
+
+        # Gate near-linear fits out of SCALE recs. When b ≈ 1 the curve is
+        # effectively straight and we have no evidence of the diminishing
+        # returns that would make "scale this channel" a safe call. A SCALE
+        # rec on a near-linear fit is the fabricated "+40% on organic_search
+        # with 100% headroom and 40x mROI" we used to produce.
+        if near_linear:
+            # Emit a MAINTAIN-WITH-CAVEAT rec instead, so the analyst sees
+            # this channel was considered for scaling but the fit didn't
+            # support it.
+            recs.append({
+                "type": "INVESTIGATE", "channel": ch,
+                "rationale": (
+                    f"{ch} response curve is near-linear (b={curve.get('params',{}).get('b',0):.2f}), "
+                    f"meaning we can't reliably identify a saturation point from current data. "
+                    f"ROI is {m['roi']:.1f}x. Recommend validating with an incrementality test "
+                    f"before scaling — the headroom signal here is unreliable."
+                ),
+                "action": "Run a geo-lift test before reallocating budget to this channel",
+                "impact": 0,  # no impact claim -- we don't know
+                "confidence": "Low",
+                "effort": "Medium",
+                "statistical_test": {"test":"response_curve_shape","b":round(float(curve.get("params",{}).get("b",0)),3),"near_linear":True},
+            })
+            continue
+
         if m["roi"] > med_roi * 1.2 and headroom > 20 and mROI > 1.5:
             # t-test: is this channel's ROI significantly above median?
             if len(m["monthly_rois"]) > 2:
@@ -52,9 +78,17 @@ def generate_recommendations(df, response_curves, attribution, significance_leve
                 sig = p_val < significance_level and t_stat > 0
             else:
                 t_stat, p_val, sig = 0, 1, False
-            
+
+            # Impact estimate: conservative. Use mROI * 0.6 (not 0.8) and
+            # cap the projected spend increase at 40% regardless of
+            # headroom (same extrapolation cap philosophy as the optimizer).
+            # This is the SCALE rec's "expected annual revenue uplift."
             increase_pct = min(headroom * 0.5, 40)
-            impact = round(m["s"] * increase_pct/100 * mROI * 0.8, 0)
+            # Extra cap: don't project impact larger than 50% of the
+            # channel's current revenue. A SCALE rec claiming +$50M on a
+            # $20M-revenue channel is almost always over-extrapolating.
+            raw_impact = m["s"] * increase_pct/100 * mROI * 0.6
+            impact = round(min(raw_impact, m["rv"] * 0.5), 0)
             recs.append({
                 "type": "SCALE", "channel": ch,
                 "rationale": f"ROI {m['roi']:.1f}x (median {med_roi:.1f}x), {headroom:.0f}% headroom, marginal ROI {mROI:.1f}x.",
