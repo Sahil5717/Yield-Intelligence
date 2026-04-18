@@ -994,6 +994,219 @@ def get_plan(view: str = "client", engagement_id: str = "default",
     return _j(plan)
 
 
+# ═══ Scenarios screen (v18f) ═══
+
+def _current_total_spend() -> float:
+    """
+    Compute the client's current annualized spend across all channels.
+    Used as the baseline for scenario comparisons and as the default
+    'baseline' preset on the Scenarios screen.
+    """
+    curves = _state.get("curves", {}) or {}
+    return sum(
+        v.get("current_avg_spend", 0) * 12
+        for v in curves.values() if "error" not in v
+    )
+
+
+def _baseline_optimization() -> Dict:
+    """
+    Return the optimizer's allocation at the current spend level — the
+    'do nothing different' counterfactual the scenario gets compared to.
+    Cached per session (curves_identity), so the comparison is stable
+    across multiple scenario calls and matches the Plan-screen baseline.
+    """
+    current_total = _current_total_spend()
+    cache_key = (round(current_total, 0), "balanced")
+    curves_identity = id(_state.get("curves"))
+    plan_cache = _state.get("_plan_cache") or {}
+    cached = plan_cache.get(cache_key)
+    if cached and cached.get("curves_identity") == curves_identity:
+        return cached["optimization"]
+    from engines.optimizer import optimize_budget
+    opt = optimize_budget(_state["curves"], current_total, objective="balanced")
+    plan_cache[cache_key] = {"optimization": opt, "curves_identity": curves_identity}
+    _state["_plan_cache"] = plan_cache
+    return opt
+
+
+@app.get("/api/scenario/presets")
+def get_scenario_presets():
+    """
+    Return the four preset budget levels the Scenarios screen offers.
+    Computed dynamically from the client's current spend so they're
+    always sensible for whatever data is loaded.
+
+    Presets:
+      baseline:    current annualized spend (the 'do nothing' lever)
+      conservative: current spend × 0.80 (recession / cost-cut scenario)
+      growth:       current spend × 1.25 (growth investment scenario)
+      recommended:  current spend × 1.05 (matches Plan-screen default,
+                    the small headroom that lets the optimizer show
+                    upside without being asked to cut)
+    """
+    _ensure_analysis()
+    if not _state.get("curves"):
+        raise HTTPException(400, "Response curves not fit yet — run /api/run-analysis first")
+    current = _current_total_spend()
+    return _j({
+        "presets": [
+            {"key": "baseline",     "label": "Current spend",     "total_budget": round(current, 0),         "description": "Keep total marketing investment at today's level."},
+            {"key": "conservative", "label": "Cut 20%",            "total_budget": round(current * 0.80, 0),  "description": "Recession-style scenario: spend 20% less in aggregate."},
+            {"key": "growth",       "label": "Increase 25%",       "total_budget": round(current * 1.25, 0),  "description": "Growth scenario: scale total marketing investment by 25%."},
+            {"key": "recommended",  "label": "Optimizer recommended", "total_budget": round(current * 1.05, 0), "description": "What the optimizer suggests — same as the Plan screen baseline."},
+        ],
+        "current_spend": round(current, 0),
+    })
+
+
+@app.get("/api/scenario")
+def get_scenario(total_budget: Optional[float] = None,
+                  objective: str = "balanced",
+                  view: str = "client",
+                  engagement_id: str = "default"):
+    """
+    Generate a what-if scenario at a specified total_budget.
+
+    Same payload shape as /api/plan PLUS a `comparison` block that shows
+    delta vs. baseline (current allocation at current spend). Without
+    that comparison, the screen reads as "Plan at a different budget"
+    — which doesn't earn its own surface. The comparison is what makes
+    Scenarios meaningful: "at $26M instead of $32M, you'd lose $4.2M of
+    revenue but ROI would actually improve by 0.4x."
+
+    Critical for stability: the optimizer is non-convex and a fresh
+    multi-restart on the same input can produce a slightly different
+    allocation. Without caching, the "Optimizer recommended" scenario
+    could disagree with the Plan screen on the same budget — confusing.
+    The scenario endpoint shares the Plan endpoint's cache so identical
+    budgets produce identical numbers.
+
+    The baseline (current spend) IS also cached because the comparison
+    reference shouldn't drift between scenario requests in the same
+    session — that would make "you've lost $X in revenue vs. baseline"
+    wobble between identical calls.
+    """
+    if view not in ("client", "editor"):
+        raise HTTPException(400, f"Invalid view '{view}' — must be 'client' or 'editor'")
+    _ensure_analysis()
+    if _state.get("campaign_data") is None:
+        raise HTTPException(400, "No data loaded — call /api/load-mock-data first")
+    if not _state.get("curves"):
+        raise HTTPException(400, "Response curves not fit yet — run /api/run-analysis first")
+
+    if total_budget is None:
+        total_budget = _current_total_spend()
+    total_budget = float(total_budget)
+
+    # Reuse cached Plan-screen optimization if the scenario budget matches
+    # what the Plan endpoint cached. Without this, the "Optimizer recommended"
+    # preset could show a different (worse) revenue delta than the Plan
+    # screen reports for the same budget — confusing the user about which
+    # number to trust. Same backend, same answer.
+    cache_key = (round(total_budget, 0), objective)
+    curves_identity = id(_state.get("curves"))
+    plan_cache = _state.get("_plan_cache") or {}
+    cached = plan_cache.get(cache_key)
+    if cached and cached.get("curves_identity") == curves_identity:
+        scenario_opt = cached["optimization"]
+    else:
+        from engines.optimizer import optimize_budget
+        scenario_opt = optimize_budget(
+            _state["curves"], total_budget, objective=objective,
+        )
+        # Cache the result so subsequent identical scenarios are stable too
+        plan_cache[cache_key] = {
+            "optimization": scenario_opt,
+            "curves_identity": curves_identity,
+        }
+        _state["_plan_cache"] = plan_cache
+
+    baseline_opt = _baseline_optimization()
+
+    # Generate the same Plan-shape payload for the scenario
+    from engines.narrative_plan import generate_plan
+    plan = generate_plan(
+        optimization=scenario_opt,
+        response_curves=_state.get("curves") or {},
+        engagement_id=engagement_id,
+        view=view,
+    )
+
+    # Comparison block: scenario vs. baseline
+    s_summary = scenario_opt.get("summary", {}) or {}
+    b_summary = baseline_opt.get("summary", {}) or {}
+    s_rev = float(s_summary.get("optimized_revenue", 0))
+    b_rev = float(b_summary.get("optimized_revenue", 0))
+    s_roi = float(s_summary.get("optimized_roi", 0))
+    b_roi = float(b_summary.get("optimized_roi", 0))
+    s_budget = float(s_summary.get("total_budget", total_budget))
+    b_budget = float(b_summary.get("total_budget", _current_total_spend()))
+
+    rev_delta = s_rev - b_rev
+    roi_delta = s_roi - b_roi
+    budget_delta = s_budget - b_budget
+
+    # Comparison narrative — short, factual, names the tradeoff
+    if abs(budget_delta) < 100_000:
+        budget_phrase = "same total spend"
+    elif budget_delta > 0:
+        budget_phrase = f"${abs(budget_delta)/1e6:.1f}M more spend"
+    else:
+        budget_phrase = f"${abs(budget_delta)/1e6:.1f}M less spend"
+
+    if rev_delta > 100_000:
+        rev_phrase = f"would generate {_format_compact(rev_delta)} more annual revenue"
+    elif rev_delta < -100_000:
+        rev_phrase = f"would lose {_format_compact(abs(rev_delta))} of annual revenue"
+    else:
+        rev_phrase = "would be roughly revenue-neutral"
+
+    if abs(roi_delta) > 0.1:
+        direction = "improve" if roi_delta > 0 else "decline"
+        roi_phrase = f", with portfolio ROI {direction} from {b_roi:.1f}x to {s_roi:.1f}x"
+    else:
+        roi_phrase = f", with portfolio ROI roughly unchanged at {s_roi:.1f}x"
+
+    comparison_narrative = (
+        f"Compared to keeping today's allocation, this scenario uses "
+        f"{budget_phrase} and {rev_phrase}{roi_phrase}."
+    )
+
+    plan["comparison"] = {
+        "narrative": comparison_narrative,
+        "scenario": {
+            "total_budget": round(s_budget, 0),
+            "projected_revenue": round(s_rev, 0),
+            "projected_roi": round(s_roi, 2),
+        },
+        "baseline": {
+            "total_budget": round(b_budget, 0),
+            "projected_revenue": round(b_rev, 0),
+            "projected_roi": round(b_roi, 2),
+        },
+        "deltas": {
+            "budget_delta": round(budget_delta, 0),
+            "revenue_delta": round(rev_delta, 0),
+            "roi_delta": round(roi_delta, 2),
+        },
+    }
+    plan["scenario_inputs"] = {
+        "total_budget": round(total_budget, 0),
+        "objective": objective,
+    }
+    return _j(plan)
+
+
+def _format_compact(amount: float) -> str:
+    """Local helper for scenario narrative compact formatting."""
+    a = abs(amount)
+    if a >= 1e9: return f"${a/1e9:.1f}B"
+    if a >= 1e6: return f"${a/1e6:.1f}M"
+    if a >= 1e3: return f"${a/1e3:.0f}K"
+    return f"${a:.0f}"
+
+
 # ═══ EY Editor Overlay endpoints (v18a) ═══
 #
 # These endpoints mutate the editor overrides stored in persistence. They

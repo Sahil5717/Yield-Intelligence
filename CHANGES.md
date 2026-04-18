@@ -141,6 +141,221 @@ before fetching `/api/diagnosis`.
 
 ---
 
+# CHANGES — v18f (Scenarios screen — what-if analysis)
+
+Third and final pitch-critical screen. The trio is now complete:
+**Diagnosis** ("what's happening") + **Plan** ("what to do") + **Scenarios**
+("what if we do X instead"). Partner pitch has all three legs.
+
+Scope is deliberately constrained to Option A from the design
+discussion: one lever (total budget), four presets, custom budget
+input, comparison-vs-baseline summary. No per-channel locks, no
+objective selector, no saved-scenario library — those are post-pitch
+expansions. The screen earns its existence by answering the "what if
+we cut 20% / add 25% / keep current" questions executives actually
+ask.
+
+## What changed
+
+### `backend/api.py` — `/api/scenario` + `/api/scenario/presets`
+
+**`GET /api/scenario/presets`** returns four dynamically-computed
+presets based on current spend:
+- `baseline` — current annualized spend (the do-nothing counterfactual)
+- `conservative` — current × 0.80 (recession scenario)
+- `growth` — current × 1.25 (growth investment scenario)
+- `recommended` — current × 1.05 (matches Plan-screen default)
+
+Presets are computed from the loaded client's current spend, so they're
+always sensible for whatever data is loaded. A client with $10M spend
+and a client with $100M spend both get meaningful preset values.
+
+**`GET /api/scenario?total_budget=X&objective=Y&view=client`** returns
+the same payload shape as `/api/plan` PLUS a `comparison` block:
+
+```python
+"comparison": {
+    "narrative": "Compared to keeping today's allocation, this scenario
+                  uses $6.3M less spend and would lose $11.0M of annual
+                  revenue, with portfolio ROI improve from 3.4x to 4.1x.",
+    "scenario": {"total_budget": ..., "projected_revenue": ..., "projected_roi": ...},
+    "baseline": {"total_budget": ..., "projected_revenue": ..., "projected_roi": ...},
+    "deltas":   {"budget_delta": ..., "revenue_delta": ..., "roi_delta": ...},
+}
+```
+
+This comparison block is what justifies Scenarios as its own screen
+rather than "Plan with different inputs." Without the vs-baseline
+framing, a reader would have to hold two mental models simultaneously;
+with it, the tradeoff is explicit.
+
+**Critical consistency fix caught while building.** The optimizer is
+non-convex: running it on identical inputs with different multi-restart
+random seeds can produce allocations that differ by millions in
+projected revenue. Without intervention, the "Optimizer recommended"
+scenario preset would show one revenue number while the Plan screen
+showed a different number for literally the same budget. That would
+destroy user trust in both screens.
+
+Fixed by having `/api/scenario` share `/api/plan`'s optimization cache
+in `_state["_plan_cache"]`, keyed by `(budget, objective)`. Identical
+inputs now return identical outputs across both endpoints.
+
+### `backend/api.py` — helper functions
+
+- `_current_total_spend()` — computes annualized current spend from fitted
+  curves (single source of truth for baseline references)
+- `_baseline_optimization()` — returns the optimizer's allocation at
+  current spend, cached identically to Plan results so the
+  comparison reference doesn't drift between calls
+- `_format_compact(amount)` — local helper for scenario narrative dollar
+  formatting (kept module-local rather than pulled into a shared utils
+  module; one-call-site, not worth the indirection)
+
+### `frontend/client/screens/Scenarios.jsx` — NEW
+
+Full screen composition:
+1. Hero section with section label + prose intro
+2. Control panel — four preset buttons in a responsive grid + custom
+   budget input in $M below
+3. Comparison card — the vs-baseline deltas in a 3-column grid
+   (Budget / Projected revenue / Portfolio ROI), each showing
+   baseline → scenario value with a signed delta below
+4. KPI row (same component as Plan)
+5. Reallocation moves (grouped by direction, reuses MoveCard)
+6. Tradeoffs (reuses TradeoffCard)
+
+**Deliberate omission:** editor controls (commentary / suppress) are
+NOT wired into Scenarios. Scenarios are exploratory tools the analyst
+USES, not deliverables they CURATE. Commentary and suppression belong
+on Diagnosis and Plan (what gets published). If this turns out wrong
+later, adding the handlers is mechanical — the MoveCard already
+accepts them as props.
+
+**Interaction model:** preset clicks are optimistic — the button's
+active state flips immediately, then the fetch resolves and updates
+the screen. Custom budget submission requires explicit "Run scenario"
+button press (not auto-submit on change) because typing "3" when you
+mean "30" shouldn't trigger a $3M scenario. Same reasoning we applied
+to the suppression reason box in v18b — commit-based input for
+destructive or expensive operations.
+
+### `frontend/client/api.js` — three new helpers
+
+```javascript
+fetchScenarioPresets()        // GET /api/scenario/presets
+fetchScenario({totalBudget, objective, view})  // GET /api/scenario?...
+ensureScenarioReady(view, opts)               // cold-start variant
+```
+
+### `frontend/client/DiagnosisApp.jsx` + `EditorApp.jsx` — third screen wired
+
+Both shells now route to three screens via `?screen=`:
+- `diagnosis` (default)
+- `plan`
+- `scenarios`
+
+Nav links added to both headers. Editor shell renders Scenarios without
+editor handlers (see deliberate omission above). "Preview as client"
+link in EditorHeader carries `currentScreen` through, so previewing
+from the Scenarios editor view opens the Scenarios client view in the
+new tab rather than defaulting to Diagnosis.
+
+## What's verified end-to-end this session
+
+```
+[OK] GET /api/scenario/presets returns 4 presets with dynamic budgets
+[OK] GET /api/scenario?total_budget=X returns moves + comparison + tradeoffs
+[OK] All 4 presets (baseline/conservative/growth/recommended) produce
+     sensible deltas vs. baseline
+[OK] Custom budgets work (tested $28.5M)
+[OK] Plan and Scenario agree on the same budget (consistency check)
+[OK] Idempotent — identical calls return identical results
+[OK] All 6 frontend routes serve correctly
+[OK] Build produces 4 HTML entries + shared DiagnosisApp chunk with
+     Scenarios screen (12.25 KB gzipped incremental)
+[OK] All 107 backend tests pass
+```
+
+## Demo flow (the complete pitch story)
+
+1. **Diagnosis**: "Your portfolio is delivering 3.4x ROI. Here's why it
+   could be stronger." → findings + EY commentary
+2. **Plan**: "Here's what we recommend." → move cards, per-channel
+   reallocation, honest tradeoffs
+3. **Scenarios**: "What if you can't / won't do exactly that?" → four
+   preset buttons, CMO picks "Cut 20%", sees the comparison: "$6.3M
+   less spend, lose $11M revenue, but ROI improves from 3.4x to 4.1x."
+
+Three screens, three consulting questions answered. The trio is what
+separates MarketLens from a calculator: Diagnosis tells the client
+what's wrong, Plan tells them what to do, Scenarios lets them see
+what happens if they choose differently. A calculator would just show
+numbers for whatever budget you type in.
+
+## Known issues to flag
+
+- **STILL NOT VISUALLY VERIFIED IN BROWSER.** Eight sessions of UI work.
+  The Scenarios screen has the most interactive surface of the three
+  (preset buttons with active state, custom input with submit button,
+  loading states during fetch, error inline alert). I built it from
+  spec. Before the pitch, you need to actually click through it.
+- **No keyboard shortcuts** for preset cycling. Minor — a power user
+  might want hjkl-style navigation between presets. Not pitch-critical.
+- **The comparison narrative** is template-based, same ceiling as
+  everywhere else. "Would generate $X more annual revenue" reads fine;
+  it's not going to move anyone with its prose.
+- **Scenarios don't persist.** The backend has scenario-save endpoints
+  from earlier work but they're not wired to this screen. A user who
+  runs a scenario, closes the tab, and comes back loses it. Fine for
+  a pitch tool. Post-pitch: wire saved scenarios into the control
+  panel so the analyst can name and recall them.
+- **No URL sync for scenario state.** Clicking "Cut 20%" doesn't
+  update the URL, so you can't share a deep link to a specific
+  scenario. Post-pitch enhancement, trivial to add.
+
+## What's next
+
+**Session C: Navigation polish.** Currently nav links are full page
+reloads (`<a href="?screen=X">`). Works, but flashes a loading state
+between screens. Session C promotes to client-side routing — likely
+a custom minimal router rather than adding react-router for three
+screens — and addresses any visual issues from the browser check.
+
+After Session C, MarketLens v19 territory: saved scenarios, URL sync,
+draft/publish flow, real database for auth persistence, per-tenant
+data isolation. Those are real-product features, not pitch-stage.
+
+## Verification before pushing v18f to Railway
+
+```bash
+cd backend
+python test_integration.py             # 69/69
+python test_mmm_correctness.py          # 18/18
+python test_optimizer_correctness.py    # 20/20
+
+cd ../frontend
+npm install && npm run build
+# 4 HTML entries: index-client, index-editor, index-vite, index-login
+
+cd ../backend
+python -m uvicorn api:app --port 8000 &
+
+# Smoke test the new endpoints
+curl -X POST http://localhost:8000/api/auth/login-v2 \
+  -H "Content-Type: application/json" \
+  -d '{"username":"ey.partner","password":"demo1234"}' | jq -r .token > /tmp/tok
+
+# Then exercise the flow — client.cmo can also do these since /api/scenario
+# is read-only (doesn't require editor role)
+curl -H "Authorization: Bearer $(cat /tmp/tok)" \
+  http://localhost:8000/api/scenario/presets
+curl -H "Authorization: Bearer $(cat /tmp/tok)" \
+  "http://localhost:8000/api/scenario?total_budget=25000000"
+```
+
+---
+
 # CHANGES — v18e (Auth + RBAC: editor / client roles, login screen, route guards)
 
 The pitch tool now has actual authentication. Four pre-seeded demo users

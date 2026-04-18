@@ -246,3 +246,47 @@ export async function ensurePlanReady(view = "client", opts = {}) {
 
   return { data: null, error };
 }
+
+// ─── Scenarios screen ───
+
+/**
+ * Fetch the list of scenario presets the backend offers (Current,
+ * Cut 20%, Increase 25%, Optimizer recommended). Computed dynamically
+ * from current spend, so they always make sense for whatever data is
+ * loaded.
+ */
+export async function fetchScenarioPresets() {
+  return apiRequest("/scenario/presets");
+}
+
+/**
+ * Fetch a scenario at a specific budget level. Returns the same payload
+ * shape as fetchPlan plus a `comparison` block (scenario vs. baseline).
+ */
+export async function fetchScenario(opts = {}) {
+  const params = new URLSearchParams();
+  if (opts.totalBudget != null) params.set("total_budget", String(opts.totalBudget));
+  if (opts.objective) params.set("objective", opts.objective);
+  if (opts.view) params.set("view", opts.view);
+  return apiRequest(`/scenario?${params.toString()}`);
+}
+
+/**
+ * Cold-start variant: ensure analysis has run, fetch the current-spend
+ * baseline scenario as the screen's initial state. Subsequent preset
+ * clicks call fetchScenario directly.
+ */
+export async function ensureScenarioReady(view = "client", opts = {}) {
+  let { data, error } = await fetchScenario({ ...opts, view });
+  if (data) return { data, error: null };
+
+  if (error && error.kind === "http" && error.status === 400) {
+    const mock = await loadMockData();
+    if (mock.error) return { data: null, error: mock.error };
+    const analysis = await runAnalysis();
+    if (analysis.error) return { data: null, error: analysis.error };
+    return await fetchScenario({ ...opts, view });
+  }
+
+  return { data: null, error };
+}

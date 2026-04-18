@@ -4,6 +4,7 @@ import { tokens as t } from "./tokens.js";
 import {
   ensureDiagnosisReady,
   ensurePlanReady,
+  ensureScenarioReady,
   saveCommentary,
   deleteCommentary,
   suppressFinding,
@@ -14,6 +15,7 @@ import {
 } from "./api.js";
 import { Diagnosis } from "./screens/Diagnosis.jsx";
 import { Plan } from "./screens/Plan.jsx";
+import { Scenarios } from "./screens/Scenarios.jsx";
 import { SuppressionModal } from "./components/SuppressionModal.jsx";
 import { Toast } from "./components/Toast.jsx";
 import { GlobalStyles } from "./DiagnosisApp.jsx";
@@ -32,7 +34,9 @@ function getScreenFromUrl() {
   if (typeof window === "undefined") return "diagnosis";
   const params = new URLSearchParams(window.location.search);
   const s = params.get("screen");
-  return s === "plan" ? "plan" : "diagnosis";
+  if (s === "plan") return "plan";
+  if (s === "scenarios") return "scenarios";
+  return "diagnosis";
 }
 
 function redirectToLogin() {
@@ -52,7 +56,10 @@ export default function EditorApp() {
   const [auth, setAuth] = useState(null);
 
   const reload = useCallback(async () => {
-    const loader = screen === "plan" ? ensurePlanReady : ensureDiagnosisReady;
+    const loader =
+      screen === "plan" ? ensurePlanReady :
+      screen === "scenarios" ? ensureScenarioReady :
+      ensureDiagnosisReady;
     const { data, error } = await loader("editor");
     if (data) {
       setState({ status: "ready", data, error: null });
@@ -174,6 +181,14 @@ export default function EditorApp() {
       {state.status === "ready" && screen === "plan" && (
         <Plan data={state.data} {...editorProps} />
       )}
+      {state.status === "ready" && screen === "scenarios" && (
+        // Scenarios renders without editor handlers even in editor mode.
+        // Deliberate: a scenario is a tool the analyst USES, not a
+        // deliverable they CURATE. Commentary and suppression live on
+        // Diagnosis and Plan (what gets published). See Scenarios.jsx
+        // header comment for the full reasoning.
+        <Scenarios data={state.data} view="editor" />
+      )}
 
       <Footer />
 
@@ -269,6 +284,7 @@ function EditorHeader({ counts, currentScreen = "diagnosis", auth = null }) {
           <nav style={{ display: "flex", alignItems: "center", gap: t.space[4] }}>
             <EditorNavLink label="Diagnosis" screen="diagnosis" active={currentScreen === "diagnosis"} />
             <EditorNavLink label="Plan" screen="plan" active={currentScreen === "plan"} />
+            <EditorNavLink label="Scenarios" screen="scenarios" active={currentScreen === "scenarios"} />
           </nav>
         </div>
 

@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import { tokens as t } from "./tokens.js";
-import { ensureDiagnosisReady, ensurePlanReady, getStoredAuth, setUnauthorizedHandler, logout } from "./api.js";
+import { ensureDiagnosisReady, ensurePlanReady, ensureScenarioReady, getStoredAuth, setUnauthorizedHandler, logout } from "./api.js";
 import { Diagnosis } from "./screens/Diagnosis.jsx";
 import { Plan } from "./screens/Plan.jsx";
+import { Scenarios } from "./screens/Scenarios.jsx";
 
 /**
  * DiagnosisApp — client-mode shell for MarketLens.
@@ -29,7 +30,9 @@ function getScreenFromUrl() {
   if (typeof window === "undefined") return "diagnosis";
   const params = new URLSearchParams(window.location.search);
   const s = params.get("screen");
-  return s === "plan" ? "plan" : "diagnosis";
+  if (s === "plan") return "plan";
+  if (s === "scenarios") return "scenarios";
+  return "diagnosis";
 }
 
 function redirectToLogin() {
@@ -58,7 +61,10 @@ export default function DiagnosisApp() {
     setUnauthorizedHandler(redirectToLogin);
 
     (async () => {
-      const loader = screen === "plan" ? ensurePlanReady : ensureDiagnosisReady;
+      const loader =
+        screen === "plan" ? ensurePlanReady :
+        screen === "scenarios" ? ensureScenarioReady :
+        ensureDiagnosisReady;
       const { data, error } = await loader("client");
       if (data) {
         setState({ status: "ready", data, error: null });
@@ -84,6 +90,9 @@ export default function DiagnosisApp() {
       )}
       {state.status === "ready" && screen === "plan" && (
         <Plan data={state.data} editorMode={false} />
+      )}
+      {state.status === "ready" && screen === "scenarios" && (
+        <Scenarios data={state.data} view="client" />
       )}
 
       <Footer />
@@ -171,6 +180,7 @@ function Header({ currentScreen = "diagnosis", auth = null }) {
           <nav style={{ display: "flex", alignItems: "center", gap: t.space[4] }}>
             <NavLink label="Diagnosis" screen="diagnosis" active={currentScreen === "diagnosis"} />
             <NavLink label="Plan" screen="plan" active={currentScreen === "plan"} />
+            <NavLink label="Scenarios" screen="scenarios" active={currentScreen === "scenarios"} />
           </nav>
         </div>
 
